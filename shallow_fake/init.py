@@ -131,5 +131,5 @@ def initialize_project(project_name: str, base_dir: Path = None):
     console.print(f"  1. Place your raw audio files in: [cyan]data_raw/{project_name}/input_audio/[/cyan]")
     console.print(f"  2. (Optional) Add text corpus to: [cyan]data_raw/{project_name}/external_corpus/corpus.txt[/cyan]")
     console.print(f"  3. Review and adjust: [cyan]config/{project_name}.yaml[/cyan]")
-    console.print(f"  4. Run: [cyan]shallow-fake asr-segment --config config/{project_name}.yaml[/cyan]")
+    console.print(f"  4. Run: [cyan]shallow-fake asr-segment --config {project_name}.yaml[/cyan]")
 

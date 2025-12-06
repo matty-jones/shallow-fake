@@ -125,22 +125,23 @@ class VoiceConfig(BaseModel):
         with open(config_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
-        # Resolve relative paths relative to config file directory
-        config_dir = config_path.parent
+        # Resolve relative paths relative to current working directory (project root)
+        # This allows config files to be in config/ while paths are relative to project root
+        project_root = Path.cwd()
         if "paths" in data:
             for key, value in data["paths"].items():
                 if isinstance(value, str):
-                    data["paths"][key] = str(config_dir / value)
+                    data["paths"][key] = str(project_root / value)
 
         if "synthetic" in data and "corpus_text_path" in data["synthetic"]:
             corpus_path = data["synthetic"]["corpus_text_path"]
             if isinstance(corpus_path, str):
-                data["synthetic"]["corpus_text_path"] = str(config_dir / corpus_path)
+                data["synthetic"]["corpus_text_path"] = str(project_root / corpus_path)
 
         if "tms" in data and "docker_compose_file" in data["tms"]:
             compose_path = data["tms"]["docker_compose_file"]
             if isinstance(compose_path, str):
-                data["tms"]["docker_compose_file"] = str(config_dir / compose_path)
+                data["tms"]["docker_compose_file"] = str(project_root / compose_path)
 
         # Auto-detect project name from real_dataset_dir
         # Project name is the directory name in datasets/<project_name>/real
@@ -176,6 +177,9 @@ class VoiceConfig(BaseModel):
 
     def ensure_directories(self):
         """Create all required directories if they don't exist."""
+        # Safeguard: prevent creating directories in config/ directory
+        config_dir = Path("config").resolve()
+        
         for path in [
             self.paths.raw_audio_dir,
             self.paths.normalized_dir,
@@ -186,6 +190,13 @@ class VoiceConfig(BaseModel):
             self.paths.tms_workspace_dir,
             self.paths.output_models_dir,
         ]:
+            resolved_path = path.resolve()
+            # Check if path would be created inside config/ directory
+            if str(resolved_path).startswith(str(config_dir)):
+                raise ValueError(
+                    f"Invalid path: {path} would be created inside config/ directory. "
+                    f"This indicates a path resolution error. Resolved path: {resolved_path}"
+                )
             path.mkdir(parents=True, exist_ok=True)
 
         # Create subdirectories

@@ -20,17 +20,18 @@ ShallowFaker provides a repeatable, low-touch pipeline that:
 - ffmpeg (for audio processing)
 - TextyMcSpeechy Docker image
 - Baseline Piper checkpoints
+- CUDA and cuDNN (for GPU-accelerated ASR) - see [CUDA_SETUP.md](CUDA_SETUP.md) for installation help
 
 ## Installation
 
-1. Activate the virtual environment:
+1. Run the setup script to create and configure the virtual environment:
 ```bash
-source .venv/bin/activate
+./setup.sh
 ```
 
-2. Install dependencies:
+2. Activate the virtual environment:
 ```bash
-pip install -r requirements.txt
+source .venv/bin/activate
 ```
 
 ## Quick Start
@@ -41,20 +42,21 @@ shallow-fake init <project_name>
 ```
 
 This creates:
-- Required directory structure (`datasets/<project_name>/`, `models/<project_name>/`, etc.)
+- Required directory structure organized by project (`datasets/<project_name>/`, `models/<project_name>/`, etc.)
 - Configuration file at `config/<project_name>.yaml`
-- Placeholder corpus file at `data_raw/external_corpus/corpus.txt`
+- Project-specific data directories (`data_raw/<project_name>/`, `data_processed/<project_name>/`)
+- Placeholder corpus file at `data_raw/<project_name>/external_corpus/corpus.txt`
 
 2. **Place your raw audio files:**
 ```bash
 # Copy your audio files to:
-data_raw/input_audio/
+data_raw/<project_name>/input_audio/
 ```
 
 3. **Run the pipeline:**
 ```bash
-shallow-fake asr-segment --config config/<project_name>.yaml
-shallow-fake build-dataset --config config/<project_name>.yaml
+shallow-fake asr-segment --config <project_name>.yaml
+shallow-fake build-dataset --config <project_name>.yaml
 # ... continue with other commands
 ```
 
@@ -75,20 +77,27 @@ shallow-fake export                 # Export ONNX model
 shallow-fake eval                   # Generate evaluation samples
 ```
 
-All commands accept a `--config` option to specify the config file (defaults to `config/voice1.yaml`).
+All commands accept a `--config` option to specify the config file name (defaults to `voice1.yaml`). The config file should be in the `config/` directory - you only need to provide the filename.
+
+**CPU Mode**: Use the `--cpu` flag with `asr-segment` to force CPU mode even if CUDA is configured:
+```bash
+shallow-fake asr-segment --config claudia.yaml --cpu
+```
+This is useful if you encounter CUDA/cuDNN issues and want to use CPU without editing the config file.
 
 ## Project Structure
 
 - `tools/` - Pipeline scripts
-- `config/` - YAML configuration files
-- `data_raw/` - Input audio and text corpora
-- `data_processed/` - Normalized audio and segments
-- `datasets/` - Real, synthetic, and combined datasets
-- `tms_workspace/` - TMS training workspace
-- `models/` - Final exported ONNX models
-- `samples/` - Evaluation audio samples
+- `config/` - YAML configuration files (one per project)
+- `data_raw/<project_name>/` - Input audio and text corpora (organized by project)
+- `data_processed/<project_name>/` - Normalized audio and segments (organized by project)
+- `datasets/<project_name>/` - Real, synthetic, and combined datasets (organized by project)
+- `tms_workspace/` - TMS training workspace (shared)
+- `models/<project_name>/` - Final exported ONNX models (organized by project)
+- `samples/<project_name>/` - Evaluation audio samples (organized by project)
 
 ## Documentation
 
-See `PRODUCT_SPEC.md` for the complete product specification and technical design.
+- `PRODUCT_SPEC.md` - Complete product specification and technical design
+- `CUDA_SETUP.md` - Guide for setting up CUDA/cuDNN for GPU acceleration
 

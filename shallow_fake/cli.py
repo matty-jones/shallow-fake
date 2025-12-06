@@ -19,6 +19,12 @@ logger = setup_logging()
 
 def load_config(config_path: Path) -> VoiceConfig:
     """Load and validate configuration."""
+    # If path is just a filename (no directory separators), assume it's in config/
+    config_str = str(config_path)
+    if "/" not in config_str and "\\" not in config_str:
+        # Just a filename, prepend config/
+        config_path = Path("config") / config_path
+    
     if not config_path.exists():
         console.print(f"[red]Error: Config file not found: {config_path}[/red]")
         raise typer.Exit(1)
@@ -49,11 +55,17 @@ def init(
 
 @app.command()
 def asr_segment(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
+    cpu: bool = typer.Option(False, "--cpu", help="Force CPU mode (overrides config device setting)"),
 ):
     """Run ASR segmentation on raw audio files."""
     console.print("[bold blue]Running ASR segmentation...[/bold blue]")
     cfg = load_config(config)
+    
+    # Override device if --cpu flag is set
+    if cpu:
+        cfg.asr.device = "cpu"
+        console.print("[yellow]Using CPU mode (--cpu flag overrides config)[/yellow]")
 
     from tools.asr_segment import process_audio_files
 
@@ -67,7 +79,7 @@ def asr_segment(
 
 @app.command()
 def build_dataset(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     min_words: int = typer.Option(3, "--min-words", help="Minimum words per segment"),
     max_words: int = typer.Option(50, "--max-words", help="Maximum words per segment"),
     max_segments: int = typer.Option(None, "--max-segments", help="Maximum segments to include"),
@@ -88,12 +100,17 @@ def build_dataset(
 
 @app.command()
 def verify(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     baseline_model: Path = typer.Option(None, "--baseline-model", help="Path to baseline Piper model"),
+    cpu: bool = typer.Option(False, "--cpu", help="Force CPU mode for Whisper transcription"),
 ):
     """Run phoneme-based verification on dataset."""
     console.print("[bold blue]Running phoneme verification...[/bold blue]")
     cfg = load_config(config)
+    
+    # Note: verify_phonemes uses CPU by default, but flag is available for consistency
+    if cpu:
+        console.print("[yellow]Using CPU mode for verification[/yellow]")
 
     from tools.verify_phonemes import verify_dataset
 
@@ -107,11 +124,16 @@ def verify(
 
 @app.command()
 def build_synth(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
+    cpu: bool = typer.Option(False, "--cpu", help="Force CPU mode for Whisper verification"),
 ):
     """Generate synthetic dataset from text corpus."""
     console.print("[bold blue]Building synthetic dataset...[/bold blue]")
     cfg = load_config(config)
+    
+    # Note: build_synthetic_dataset uses CPU by default for verification, but flag is available for consistency
+    if cpu:
+        console.print("[yellow]Using CPU mode for verification[/yellow]")
 
     from tools.build_synthetic_dataset import build_synthetic_dataset
 
@@ -125,7 +147,7 @@ def build_synth(
 
 @app.command()
 def combine(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     subsample_synth: float = typer.Option(None, "--subsample-synth", help="Subsample synthetic data by ratio (0.0-1.0)"),
 ):
     """Combine real and synthetic datasets."""
@@ -144,7 +166,7 @@ def combine(
 
 @app.command()
 def train(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
 ):
     """Launch TMS training container."""
     console.print("[bold blue]Launching training...[/bold blue]")
@@ -155,7 +177,9 @@ def train(
     try:
         launch_training(cfg)
         console.print("[green]Training container launched![/green]")
-        console.print(f"Monitor with: [cyan]shallow-fake monitor --config {config}[/cyan]")
+        # Show just the filename for monitor command
+        config_name = config.name if config.parent.name == "config" else str(config)
+        console.print(f"Monitor with: [cyan]shallow-fake monitor --config {config_name}[/cyan]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
@@ -163,7 +187,7 @@ def train(
 
 @app.command()
 def monitor(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     no_follow: bool = typer.Option(False, "--no-follow", help="Don't follow logs, just show recent"),
     tensorboard: bool = typer.Option(False, "--tensorboard", help="Show TensorBoard information"),
 ):
@@ -183,7 +207,7 @@ def monitor(
 
 @app.command()
 def export(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     checkpoint: Path = typer.Option(None, "--checkpoint", help="Path to checkpoint file"),
 ):
     """Export trained model to ONNX format."""
@@ -202,7 +226,7 @@ def export(
 
 @app.command()
 def eval(
-    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     phrases_file: Path = typer.Option(None, "--phrases-file", help="File with phrases to generate (one per line)"),
     model_name: str = typer.Option(None, "--model-name", help="Model name (default: voice_id-quality)"),
 ):

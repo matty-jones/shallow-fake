@@ -19,7 +19,15 @@ logger = setup_logging()
 def phonemize_text(text: str, language: str) -> str:
     """Convert text to phoneme sequence using piper-phonemize."""
     try:
-        phonemes = phonemize_espeak(text, language=language)
+        # piper-phonemize uses 'voice' parameter, not 'language'
+        # Convert language code to voice format (e.g., 'en-gb' -> 'en')
+        voice = language.split('-')[0] if '-' in language else language
+        
+        # phonemize_espeak returns List[List[str]] (list of lists, one per sentence)
+        phonemes_nested = phonemize_espeak(text, voice=voice)
+        
+        # Flatten the nested list
+        phonemes = [p for sublist in phonemes_nested for p in sublist]
         return " ".join(phonemes)
     except Exception as e:
         logger.error(f"Error phonemizing text '{text}': {e}")
@@ -59,7 +67,10 @@ def synthesize_with_piper(text: str, piper_model_path: str, output_path: Path) -
 def transcribe_with_whisper(audio_path: Path, model_size: str = "base.en", device: str = "cpu") -> str:
     """Transcribe audio using Whisper."""
     try:
-        model = WhisperModel(model_size, device=device, compute_type="int8")
+        # Always use CPU for verification to avoid CUDA issues
+        # Verification is quick and doesn't need GPU speed
+        actual_device = "cpu"
+        model = WhisperModel(model_size, device=actual_device, compute_type="int8")
         segments, _ = model.transcribe(str(audio_path), language="en")
         # Concatenate all segments
         text = " ".join(segment.text for segment in segments)
@@ -244,6 +255,24 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
             logger.info(f"  {wav_path}: distance={distance:.4f}")
             logger.info(f"    Original: {text}")
             logger.info(f"    Whisper:  {whisper_text}")
+        
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("Manual Recovery Instructions")
+        logger.info("=" * 60)
+        logger.info("If you agree with the Original transcription (not the Whisper transcription),")
+        logger.info("you can manually add these rejected entries to the cleaned dataset.")
+        logger.info("")
+        logger.info("Run the following commands to add all rejected entries:")
+        logger.info("")
+        
+        # Generate commands for all rejected entries
+        for wav_path, text, distance, whisper_text in invalid_entries:
+            logger.info(f'echo "{wav_path}|{text}" >> {cleaned_metadata_csv}')
+            logger.info(f"cp {wavs_dir / Path(wav_path).name} {cleaned_wavs_dir / Path(wav_path).name}")
+        
+        logger.info("")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
@@ -269,4 +298,5 @@ if __name__ == "__main__":
             i += 1
 
     verify_dataset(config, baseline_model)
+
 

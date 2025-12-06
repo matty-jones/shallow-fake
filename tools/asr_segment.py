@@ -29,11 +29,12 @@ def normalize_audio(input_path: Path, output_path: Path) -> Path:
                 loglevel="error",
             )
             .overwrite_output()
-            .run(capture_output=True, check=True)
+            .run(quiet=True)
         )
         return output_path
     except ffmpeg.Error as e:
-        logger.error(f"FFmpeg error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        logger.error(f"FFmpeg error: {error_msg}")
         raise
     except Exception as e:
         logger.error(f"Error normalizing audio: {e}")
@@ -120,11 +121,12 @@ def extract_segment_audio(
                 loglevel="error",
             )
             .overwrite_output()
-            .run(capture_output=True, check=True)
+            .run(quiet=True)
         )
         return output_path
     except ffmpeg.Error as e:
-        logger.error(f"FFmpeg error extracting segment: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        logger.error(f"FFmpeg error extracting segment: {error_msg}")
         raise
     except Exception as e:
         logger.error(f"Error extracting segment: {e}")
@@ -208,4 +210,5 @@ if __name__ == "__main__":
     config = VoiceConfig.from_yaml(config_path)
     config.ensure_directories()
     process_audio_files(config)
+
 

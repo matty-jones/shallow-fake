@@ -65,9 +65,13 @@ def normalize_audio_to_piper(input_path: Path, output_path: Path) -> bool:
                 loglevel="error",
             )
             .overwrite_output()
-            .run(capture_output=True, check=True)
+            .run(quiet=True)
         )
         return True
+    except ffmpeg.Error as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        logger.error(f"FFmpeg error normalizing audio: {error_msg}")
+        return False
     except Exception as e:
         logger.error(f"Error normalizing audio: {e}")
         return False
@@ -95,7 +99,15 @@ def load_corpus(corpus_path: Path, max_sentences: Optional[int] = None) -> List[
 def phonemize_text(text: str, language: str) -> str:
     """Convert text to phoneme sequence."""
     try:
-        phonemes = phonemize_espeak(text, language=language)
+        # piper-phonemize uses 'voice' parameter, not 'language'
+        # Convert language code to voice format (e.g., 'en-gb' -> 'en')
+        voice = language.split('-')[0] if '-' in language else language
+        
+        # phonemize_espeak returns List[List[str]] (list of lists, one per sentence)
+        phonemes_nested = phonemize_espeak(text, voice=voice)
+        
+        # Flatten the nested list
+        phonemes = [p for sublist in phonemes_nested for p in sublist]
         return " ".join(phonemes)
     except Exception as e:
         logger.error(f"Error phonemizing text: {e}")
@@ -141,7 +153,7 @@ def verify_synthetic_entry(
     config: VoiceConfig,
 ) -> tuple[bool, float]:
     """Verify synthetic entry using phoneme comparison."""
-    # Transcribe with Whisper
+    # Transcribe with Whisper (always use CPU for verification)
     try:
         model = WhisperModel("base.en", device="cpu", compute_type="int8")
         segments, _ = model.transcribe(str(audio_path), language="en")
