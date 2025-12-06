@@ -1,19 +1,15 @@
-# voice_id is auto-detected from the directory structure (datasets/<project_name>/real)
-# If specified, it must match the project directory name
-# voice_id: voice1
+voice_id: claudia
 language: en_GB
-
 paths:
-  raw_audio_dir: data_raw/input_audio
-  normalized_dir: data_processed/normalized
-  segments_dir: data_processed/segments
-  asr_metadata: data_processed/asr_segments.jsonl
-  real_dataset_dir: datasets/voice1/real
-  synth_dataset_dir: datasets/voice1/synth
-  combined_dataset_dir: datasets/voice1/combined
+  raw_audio_dir: data_raw/claudia/input_audio
+  normalized_dir: data_processed/claudia/normalized
+  segments_dir: data_processed/claudia/segments
+  asr_metadata: data_processed/claudia/asr_segments.jsonl
+  real_dataset_dir: datasets/claudia/real
+  synth_dataset_dir: datasets/claudia/synth
+  combined_dataset_dir: datasets/claudia/combined
   tms_workspace_dir: tms_workspace
-  output_models_dir: models/voice1
-
+  output_models_dir: models/claudia
 asr:
   model_size: medium.en
   device: cuda
@@ -21,22 +17,19 @@ asr:
   max_segment_seconds: 15
   min_segment_seconds: 1.0
   min_confidence: 0.7
-
 phoneme_check:
   language: en-gb
   max_phoneme_distance: 0.1
   use_tts_roundtrip: true
-
 synthetic:
   enabled: true
-  corpus_text_path: data_raw/external_corpus/corpus.txt
+  corpus_text_path: data_raw/claudia/external_corpus/corpus.txt
   max_sentences: 2000
   tts_backend: http
   tts_http:
     base_url: http://localhost:9000/tts
-    voice_id: voice1_clone
+    voice_id: claudia_clone
   max_parallel_jobs: 4
-
 training:
   base_checkpoint: en_GB-base-medium.ckpt
   batch_size: 32
@@ -44,11 +37,9 @@ training:
   quality: medium
   accelerator: gpu
   devices: 1
-
 tms:
   enable_tts_dojo: true
   docker_compose_file: docker/docker-compose.training.yml
-  project_name: voice1-voice
+  project_name: claudia-voice
   expose_tensorboard: true
   tensorboard_port: 6006
-
