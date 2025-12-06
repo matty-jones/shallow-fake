@@ -1,7 +1,7 @@
 """Configuration management with Pydantic validation."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -48,6 +48,26 @@ class TTSHTTPConfig(BaseModel):
     voice_id: str
 
 
+class XTTSTeacherConfig(BaseModel):
+    """XTTS teacher service configuration."""
+
+    kind: Literal["xtts"] = Field(default="xtts")
+    port: int = Field(default=9010, ge=1024, le=65535)
+    model_name: str = Field(default="tts_models/multilingual/multi-dataset/xtts_v2")
+    language: str = Field(default="en")
+    device: Literal["cuda", "cpu"] = Field(default="cuda")
+    reference_audio_dir: Path
+    num_reference_clips: int = Field(default=3, ge=1)
+
+    @field_validator("reference_audio_dir", mode="before")
+    @classmethod
+    def convert_reference_audio_dir(cls, v):
+        """Convert reference_audio_dir to Path object."""
+        if isinstance(v, str):
+            return Path(v)
+        return v
+
+
 class SyntheticConfig(BaseModel):
     """Synthetic data expansion configuration."""
 
@@ -56,6 +76,7 @@ class SyntheticConfig(BaseModel):
     max_sentences: int = Field(default=2000, ge=0)
     tts_backend: Literal["http"] = Field(default="http")
     tts_http: TTSHTTPConfig
+    teacher: Optional[XTTSTeacherConfig] = Field(default=None)
     max_parallel_jobs: int = Field(default=4, ge=1)
 
 
@@ -137,6 +158,12 @@ class VoiceConfig(BaseModel):
             corpus_path = data["synthetic"]["corpus_text_path"]
             if isinstance(corpus_path, str):
                 data["synthetic"]["corpus_text_path"] = str(project_root / corpus_path)
+
+        # Resolve reference_audio_dir path if teacher is configured
+        if "synthetic" in data and "teacher" in data["synthetic"] and data["synthetic"]["teacher"]:
+            teacher = data["synthetic"]["teacher"]
+            if "reference_audio_dir" in teacher and isinstance(teacher["reference_audio_dir"], str):
+                teacher["reference_audio_dir"] = str(project_root / teacher["reference_audio_dir"])
 
         if "tms" in data and "docker_compose_file" in data["tms"]:
             compose_path = data["tms"]["docker_compose_file"]

@@ -19,10 +19,23 @@ logger = setup_logging()
 
 def load_config(config_path: Path) -> VoiceConfig:
     """Load and validate configuration."""
+    # Convert to Path if it's a string
+    if isinstance(config_path, str):
+        config_path = Path(config_path)
+    
     # If path is just a filename (no directory separators), assume it's in config/
     config_str = str(config_path)
     if "/" not in config_str and "\\" not in config_str:
         # Just a filename, prepend config/
+        config_path = Path("config") / config_path
+    
+    # If no extension provided, add .yaml
+    if not config_path.suffix:
+        config_path = config_path.with_suffix(".yaml")
+    
+    # If still no directory separators after adding extension, prepend config/
+    config_str = str(config_path)
+    if "/" not in config_str and "\\" not in config_str:
         config_path = Path("config") / config_path
     
     if not config_path.exists():
@@ -35,6 +48,26 @@ def load_config(config_path: Path) -> VoiceConfig:
         return config
     except Exception as e:
         console.print(f"[red]Error loading config: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def status(
+    config: Path = typer.Option(None, "--config", "-c", help="Show status for specific project (optional)"),
+):
+    """Show pipeline status and progress for all projects (or a specific project if --config is provided)."""
+    from shallow_fake.status import show_all_status, show_status
+    
+    try:
+        if config is not None:
+            # Show status for specific project
+            cfg = load_config(config)
+            show_status(cfg)
+        else:
+            # Show status for all projects
+            show_all_status()
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
 
@@ -134,6 +167,10 @@ def build_synth(
     # Note: build_synthetic_dataset uses CPU by default for verification, but flag is available for consistency
     if cpu:
         console.print("[yellow]Using CPU mode for verification[/yellow]")
+
+    # Check if XTTS teacher is configured
+    if cfg.synthetic.teacher and cfg.synthetic.teacher.kind == "xtts":
+        console.print("[cyan]XTTS teacher service will be started automatically[/cyan]")
 
     from tools.build_synthetic_dataset import build_synthetic_dataset
 

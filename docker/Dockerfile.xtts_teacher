@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+# System deps – ffmpeg is useful for audio sanity, certs for HTTPS if needed
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ffmpeg \
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Coqui TTS (includes XTTS v2) and FastAPI/uvicorn HTTP server
+# Pin transformers version to ensure BeamSearchScorer is available (4.30-4.36 range)
+# Install torchcodec for audio loading support
+RUN pip install --no-cache-dir \
+      "transformers>=4.30.0,<4.37.0" \
+      "TTS>=0.22.0" \
+      "torchcodec" \
+      fastapi \
+      uvicorn[standard]
+
+# Copy server implementation
+COPY services/xtts_teacher_server.py .
+
+ENV PYTHONUNBUFFERED=1
+ENV COQUI_TOS_AGREED=1
+
+# Pre-create TOS acceptance file to avoid interactive prompt
+RUN mkdir -p /root/.local/share/tts && \
+    echo "accepted" > /root/.local/share/tts/.coqui_tos
+
+# Default port; overridden by Docker port mapping
+CMD ["uvicorn", "xtts_teacher_server:app", "--host", "0.0.0.0", "--port", "9010"]
+

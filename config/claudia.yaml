@@ -23,12 +23,20 @@ phoneme_check:
   use_tts_roundtrip: true
 synthetic:
   enabled: true
-  corpus_text_path: data_raw/claudia/external_corpus/corpus.txt
-  max_sentences: 2000
+  corpus_text_path: data_raw/external_corpus/corpus.txt
+  max_sentences: 3020
   tts_backend: http
   tts_http:
-    base_url: http://localhost:9000/tts
+    base_url: http://localhost:9010/tts
     voice_id: claudia_clone
+  teacher:
+    kind: xtts
+    port: 9010
+    model_name: tts_models/multilingual/multi-dataset/xtts_v2
+    language: en
+    device: cuda
+    reference_audio_dir: datasets/claudia/real_clean/wavs
+    num_reference_clips: 3
   max_parallel_jobs: 4
 training:
   base_checkpoint: en_GB-base-medium.ckpt

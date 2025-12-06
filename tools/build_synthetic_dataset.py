@@ -233,54 +233,124 @@ def build_synthetic_dataset(config: VoiceConfig):
         logger.error("No sentences loaded from corpus")
         return
 
-    # Create TTS backend
-    if config.synthetic.tts_backend == "http":
-        tts_backend = HTTPTTSBackend(
-            config.synthetic.tts_http.base_url,
-            config.synthetic.tts_http.voice_id,
-        )
-    else:
-        logger.error(f"Unsupported TTS backend: {config.synthetic.tts_backend}")
-        return
+    # Start XTTS teacher service if configured
+    xtts_teacher_started = False
+    if config.synthetic.teacher and config.synthetic.teacher.kind == "xtts":
+        try:
+            from tools.xtts_teacher_orchestration import start_xtts_teacher, stop_xtts_teacher
 
-    # Generate synthetic entries in parallel
-    logger.info(f"Generating {len(sentences)} synthetic entries...")
-    valid_entries = []
-    max_workers = config.synthetic.max_parallel_jobs
+            logger.info("Starting XTTS teacher service...")
+            start_xtts_teacher(config)
+            xtts_teacher_started = True
+            logger.info("XTTS teacher service started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start XTTS teacher service: {e}")
+            logger.error("Synthetic dataset generation aborted")
+            return
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                generate_synthetic_entry,
-                text,
-                i,
-                tts_backend,
-                wavs_dir,
-                config,
-            ): (i, text)
-            for i, text in enumerate(sentences)
-        }
+    try:
+        # Create TTS backend
+        if config.synthetic.tts_backend == "http":
+            tts_backend = HTTPTTSBackend(
+                config.synthetic.tts_http.base_url,
+                config.synthetic.tts_http.voice_id,
+            )
+        else:
+            logger.error(f"Unsupported TTS backend: {config.synthetic.tts_backend}")
+            return
 
-        for future in as_completed(futures):
-            i, text = futures[future]
+        # Generate synthetic entries in parallel
+        logger.info(f"Generating {len(sentences)} synthetic entries...")
+        valid_entries = []
+        max_workers = config.synthetic.max_parallel_jobs
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    generate_synthetic_entry,
+                    text,
+                    i,
+                    tts_backend,
+                    wavs_dir,
+                    config,
+                ): (i, text)
+                for i, text in enumerate(sentences)
+            }
+
+            completed = 0
+            total = len(sentences)
+            for future in as_completed(futures):
+                completed += 1
+                i, text = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        valid_entries.append(result)
+                    logger.info(f"Progress: {completed}/{total} entries processed ({len(valid_entries)} valid)")
+                except Exception as e:
+                    logger.error(f"Error generating entry {i}: {e}")
+                    logger.info(f"Progress: {completed}/{total} entries processed ({len(valid_entries)} valid)")
+
+        # Write metadata
+        logger.info(f"Writing metadata with {len(valid_entries)} entries")
+        with open(metadata_csv, "w", encoding="utf-8") as f:
+            for wav_path, text in valid_entries:
+                # Escape pipe characters
+                text_escaped = text.replace("|", " ")
+                f.write(f"{wav_path}|{text_escaped}\n")
+
+        logger.info(f"Synthetic dataset built: {len(valid_entries)} entries in {synth_dataset_dir}")
+
+    finally:
+        # Stop XTTS teacher service if we started it
+        if xtts_teacher_started:
             try:
-                result = future.result()
-                if result:
-                    valid_entries.append(result)
-                    if len(valid_entries) % 10 == 0:
-                        logger.info(f"Generated {len(valid_entries)} valid entries...")
+                from tools.xtts_teacher_orchestration import stop_xtts_teacher
+                import subprocess
+
+                # Check container logs before stopping if there were errors
+                if len(valid_entries) == 0 and sentences:
+                    logger.warning("No valid entries generated. Checking container logs...")
+                    try:
+                        # Try to get logs from running or stopped container
+                        result = subprocess.run(
+                            ["docker", "logs", f"{config.voice_id}_xtts_teacher"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if result.stdout:
+                            logger.error("Container logs (stdout):")
+                            for line in result.stdout.split("\n")[-100:]:  # Last 100 lines
+                                if line.strip():
+                                    logger.error(f"  {line}")
+                        if result.stderr:
+                            logger.error("Container logs (stderr):")
+                            for line in result.stderr.split("\n")[-100:]:  # Last 100 lines
+                                if line.strip():
+                                    logger.error(f"  {line}")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Timeout retrieving container logs")
+                    except Exception as log_error:
+                        logger.warning(f"Could not retrieve container logs: {log_error}")
+                        # Try alternative: check if container exists and get status
+                        try:
+                            status_result = subprocess.run(
+                                ["docker", "ps", "-a", "--filter", f"name={config.voice_id}_xtts_teacher", "--format", "{{.Status}}"],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                            )
+                            if status_result.stdout.strip():
+                                logger.info(f"Container status: {status_result.stdout.strip()}")
+                        except Exception:
+                            pass
+
+                logger.info("Stopping XTTS teacher service...")
+                stop_xtts_teacher(config)
+                logger.info("XTTS teacher service stopped")
             except Exception as e:
-                logger.error(f"Error generating entry {i}: {e}")
-
-    # Write metadata
-    logger.info(f"Writing metadata with {len(valid_entries)} entries")
-    with open(metadata_csv, "w", encoding="utf-8") as f:
-        for wav_path, text in valid_entries:
-            # Escape pipe characters
-            text_escaped = text.replace("|", " ")
-            f.write(f"{wav_path}|{text_escaped}\n")
-
-    logger.info(f"Synthetic dataset built: {len(valid_entries)} entries in {synth_dataset_dir}")
+                logger.warning(f"Error stopping XTTS teacher service: {e}")
 
     # Now run phoneme verification on the synthetic dataset
     logger.info("Running phoneme verification on synthetic dataset...")
@@ -290,6 +360,7 @@ def build_synthetic_dataset(config: VoiceConfig):
     # Temporarily update config paths to point to synthetic dataset
     original_real_dir = config.paths.real_dataset_dir
     config.paths.real_dataset_dir = synth_dataset_dir
+    from tools.verify_phonemes import verify_dataset
     verify_dataset(config)
     config.paths.real_dataset_dir = original_real_dir
 

@@ -16,11 +16,12 @@ ShallowFaker provides a repeatable, low-touch pipeline that:
 ## Requirements
 
 - Python 3.10 or 3.11
-- Docker and NVIDIA Container Toolkit (for GPU training)
+- Docker and NVIDIA Container Toolkit (for GPU training and XTTS teacher service)
 - ffmpeg (for audio processing)
 - TextyMcSpeechy Docker image
 - Baseline Piper checkpoints
 - CUDA and cuDNN (for GPU-accelerated ASR) - see [CUDA_SETUP.md](CUDA_SETUP.md) for installation help
+- Coqui TTS (installed automatically in XTTS teacher Docker container)
 
 ## Installation
 
@@ -45,7 +46,7 @@ This creates:
 - Required directory structure organized by project (`datasets/<project_name>/`, `models/<project_name>/`, etc.)
 - Configuration file at `config/<project_name>.yaml`
 - Project-specific data directories (`data_raw/<project_name>/`, `data_processed/<project_name>/`)
-- Placeholder corpus file at `data_raw/<project_name>/external_corpus/corpus.txt`
+- Placeholder corpus file at `data_raw/external_corpus/corpus.txt` (shared across all projects)
 
 2. **Place your raw audio files:**
 ```bash
@@ -66,10 +67,11 @@ The pipeline is controlled via a Typer-based CLI:
 
 ```bash
 shallow-fake init <project_name>    # Initialize a new project
+shallow-fake status                 # Show pipeline progress and status
 shallow-fake asr-segment            # Run ASR + segmentation
 shallow-fake build-dataset          # Build real dataset
 shallow-fake verify                 # Run phoneme sanity check
-shallow-fake build-synth            # Generate synthetic dataset
+shallow-fake build-synth            # Generate synthetic dataset (starts XTTS teacher automatically if configured)
 shallow-fake combine                # Merge datasets
 shallow-fake train                  # Launch TMS training container
 shallow-fake monitor                # Monitor training progress
@@ -77,7 +79,15 @@ shallow-fake export                 # Export ONNX model
 shallow-fake eval                   # Generate evaluation samples
 ```
 
-All commands accept a `--config` option to specify the config file name (defaults to `voice1.yaml`). The config file should be in the `config/` directory - you only need to provide the filename.
+**Status Command**: Use `shallow-fake status` to see which pipeline stages have been completed and what the next step should be:
+```bash
+shallow-fake status --config claudia.yaml
+```
+
+All commands accept a `--config` option to specify the config file (defaults to `voice1.yaml`). You can provide:
+- Just the project name: `--config claudia` (automatically looks for `config/claudia.yaml`)
+- The filename: `--config claudia.yaml` (automatically looks in `config/` directory)
+- Full path: `--config config/claudia.yaml` (if needed)
 
 **CPU Mode**: Use the `--cpu` flag with `asr-segment` to force CPU mode even if CUDA is configured:
 ```bash
@@ -85,16 +95,26 @@ shallow-fake asr-segment --config claudia.yaml --cpu
 ```
 This is useful if you encounter CUDA/cuDNN issues and want to use CPU without editing the config file.
 
+**XTTS Teacher Integration**: The `build-synth` command automatically starts an XTTS v2 teacher service (if configured) to generate high-quality synthetic voice data. The service:
+- Uses reference audio from your cleaned real dataset (`datasets/<project_name>/real_clean/wavs`)
+- Starts automatically when `build-synth` runs
+- Stops automatically after synthetic data generation completes
+- Requires Docker to be running
+- Uses zero-shot voice cloning (no fine-tuning needed)
+
 ## Project Structure
 
 - `tools/` - Pipeline scripts
 - `config/` - YAML configuration files (one per project)
-- `data_raw/<project_name>/` - Input audio and text corpora (organized by project)
+- `data_raw/<project_name>/` - Input audio (organized by project)
+- `data_raw/external_corpus/` - Text corpus for synthetic data generation (shared across all projects)
 - `data_processed/<project_name>/` - Normalized audio and segments (organized by project)
 - `datasets/<project_name>/` - Real, synthetic, and combined datasets (organized by project)
 - `tms_workspace/` - TMS training workspace (shared)
 - `models/<project_name>/` - Final exported ONNX models (organized by project)
+- `models/xtts_baseline/` - XTTS baseline model cache (shared across all projects)
 - `samples/<project_name>/` - Evaluation audio samples (organized by project)
+- `services/` - XTTS teacher service implementation
 
 ## Documentation
 

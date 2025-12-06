@@ -34,7 +34,6 @@ def initialize_project(project_name: str, base_dir: Path = None):
     # Create directory structure (organized by project)
     directories = [
         base_dir / "data_raw" / project_name / "input_audio",
-        base_dir / "data_raw" / project_name / "external_corpus",
         base_dir / "data_processed" / project_name / "normalized",
         base_dir / "data_processed" / project_name / "segments",
         base_dir / "datasets" / project_name / "real" / "wavs",
@@ -51,6 +50,20 @@ def initialize_project(project_name: str, base_dir: Path = None):
     for directory in directories:
         ensure_dir(directory)
         console.print(f"  Created: {directory}")
+
+    # Create project-agnostic external corpus directory (shared across all projects)
+    external_corpus_dir = base_dir / "data_raw" / "external_corpus"
+    was_new = not external_corpus_dir.exists()
+    ensure_dir(external_corpus_dir)
+    if was_new:
+        console.print(f"  Created: {external_corpus_dir}")
+
+    # Create XTTS baseline model directory (universal across all projects)
+    xtts_baseline_dir = base_dir / "models" / "xtts_baseline"
+    was_new_xtts = not xtts_baseline_dir.exists()
+    ensure_dir(xtts_baseline_dir)
+    if was_new_xtts:
+        console.print(f"  Created: {xtts_baseline_dir}")
 
     # Create config file
     config_dir = base_dir / "config"
@@ -86,12 +99,21 @@ def initialize_project(project_name: str, base_dir: Path = None):
         },
         "synthetic": {
             "enabled": True,
-            "corpus_text_path": f"data_raw/{project_name}/external_corpus/corpus.txt",
+            "corpus_text_path": "data_raw/external_corpus/corpus.txt",
             "max_sentences": 2000,
             "tts_backend": "http",
             "tts_http": {
-                "base_url": "http://localhost:9000/tts",
+                "base_url": "http://localhost:9010/tts",
                 "voice_id": f"{project_name}_clone",
+            },
+            "teacher": {
+                "kind": "xtts",
+                "port": 9010,
+                "model_name": "tts_models/multilingual/multi-dataset/xtts_v2",
+                "language": "en",
+                "device": "cuda",
+                "reference_audio_dir": f"datasets/{project_name}/real_clean/wavs",
+                "num_reference_clips": 3,
             },
             "max_parallel_jobs": 4,
         },
@@ -117,19 +139,20 @@ def initialize_project(project_name: str, base_dir: Path = None):
 
     console.print(f"  Created: {config_file}")
 
-    # Create placeholder corpus file
-    corpus_file = base_dir / "data_raw" / project_name / "external_corpus" / "corpus.txt"
+    # Create placeholder corpus file (project-agnostic, shared across all projects)
+    corpus_file = base_dir / "data_raw" / "external_corpus" / "corpus.txt"
     if not corpus_file.exists():
         corpus_file.write_text(
             "# Add your text corpus here, one sentence per line.\n"
             "# This will be used for synthetic data generation.\n"
+            "# This corpus is shared across all projects.\n"
         )
         console.print(f"  Created: {corpus_file}")
 
     console.print(f"\n[green]Project '{project_name}' initialized successfully![/green]")
     console.print(f"\nNext steps:")
     console.print(f"  1. Place your raw audio files in: [cyan]data_raw/{project_name}/input_audio/[/cyan]")
-    console.print(f"  2. (Optional) Add text corpus to: [cyan]data_raw/{project_name}/external_corpus/corpus.txt[/cyan]")
+    console.print(f"  2. (Optional) Add text corpus to: [cyan]data_raw/external_corpus/corpus.txt[/cyan]")
     console.print(f"  3. Review and adjust: [cyan]config/{project_name}.yaml[/cyan]")
     console.print(f"  4. Run: [cyan]shallow-fake asr-segment --config {project_name}.yaml[/cyan]")
 

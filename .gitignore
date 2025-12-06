@@ -1,3 +1,5 @@
+temp/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -40,9 +42,15 @@ logs/
 *.onnx
 *.onnx.json
 
+# XTTS model cache (keep directory structure, ignore contents)
+models/xtts_baseline/**
+!models/xtts_baseline/.gitkeep
+
 # Temporary files
 *.tmp
 *.temp
 .cache/
+.env.*.xtts
+
 
 
