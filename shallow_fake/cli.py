@@ -1,0 +1,230 @@
+"""Typer-based CLI for ShallowFaker pipeline."""
+
+import sys
+from pathlib import Path
+
+import typer
+from rich.console import Console
+
+from shallow_fake.config import VoiceConfig
+from shallow_fake.utils import setup_logging
+
+# Add tools directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+app = typer.Typer(help="ShallowFaker - Voice Piper Clone Pipeline")
+console = Console()
+logger = setup_logging()
+
+
+def load_config(config_path: Path) -> VoiceConfig:
+    """Load and validate configuration."""
+    if not config_path.exists():
+        console.print(f"[red]Error: Config file not found: {config_path}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        config = VoiceConfig.from_yaml(config_path)
+        config.ensure_directories()
+        return config
+    except Exception as e:
+        console.print(f"[red]Error loading config: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def init(
+    project_name: str = typer.Argument(..., help="Name of the project to initialize"),
+    base_dir: Path = typer.Option(None, "--base-dir", "-d", help="Base directory (defaults to current directory)"),
+):
+    """Initialize a new project with directory structure and config file."""
+    from shallow_fake.init import initialize_project
+
+    try:
+        initialize_project(project_name, base_dir)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def asr_segment(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+):
+    """Run ASR segmentation on raw audio files."""
+    console.print("[bold blue]Running ASR segmentation...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.asr_segment import process_audio_files
+
+    try:
+        process_audio_files(cfg)
+        console.print("[green]ASR segmentation complete![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def build_dataset(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    min_words: int = typer.Option(3, "--min-words", help="Minimum words per segment"),
+    max_words: int = typer.Option(50, "--max-words", help="Maximum words per segment"),
+    max_segments: int = typer.Option(None, "--max-segments", help="Maximum segments to include"),
+):
+    """Build dataset metadata from ASR segments."""
+    console.print("[bold blue]Building dataset...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.build_metadata import build_metadata
+
+    try:
+        build_metadata(cfg, min_words, max_words, max_segments)
+        console.print("[green]Dataset built successfully![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def verify(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    baseline_model: Path = typer.Option(None, "--baseline-model", help="Path to baseline Piper model"),
+):
+    """Run phoneme-based verification on dataset."""
+    console.print("[bold blue]Running phoneme verification...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.verify_phonemes import verify_dataset
+
+    try:
+        verify_dataset(cfg, str(baseline_model) if baseline_model else None)
+        console.print("[green]Phoneme verification complete![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def build_synth(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+):
+    """Generate synthetic dataset from text corpus."""
+    console.print("[bold blue]Building synthetic dataset...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.build_synthetic_dataset import build_synthetic_dataset
+
+    try:
+        build_synthetic_dataset(cfg)
+        console.print("[green]Synthetic dataset built successfully![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def combine(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    subsample_synth: float = typer.Option(None, "--subsample-synth", help="Subsample synthetic data by ratio (0.0-1.0)"),
+):
+    """Combine real and synthetic datasets."""
+    console.print("[bold blue]Combining datasets...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.combine_datasets import combine_datasets
+
+    try:
+        combine_datasets(cfg, subsample_synth)
+        console.print("[green]Datasets combined successfully![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def train(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+):
+    """Launch TMS training container."""
+    console.print("[bold blue]Launching training...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.launch_training import launch_training
+
+    try:
+        launch_training(cfg)
+        console.print("[green]Training container launched![/green]")
+        console.print(f"Monitor with: [cyan]shallow-fake monitor --config {config}[/cyan]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def monitor(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    no_follow: bool = typer.Option(False, "--no-follow", help="Don't follow logs, just show recent"),
+    tensorboard: bool = typer.Option(False, "--tensorboard", help="Show TensorBoard information"),
+):
+    """Monitor training progress."""
+    cfg = load_config(config)
+
+    from tools.monitor_training import monitor_training
+
+    try:
+        monitor_training(cfg, follow_logs=not no_follow, tensorboard=tensorboard)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Monitoring stopped[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def export(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    checkpoint: Path = typer.Option(None, "--checkpoint", help="Path to checkpoint file"),
+):
+    """Export trained model to ONNX format."""
+    console.print("[bold blue]Exporting ONNX model...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.export_onnx import export_onnx
+
+    try:
+        export_onnx(cfg, checkpoint)
+        console.print("[green]ONNX export complete![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def eval(
+    config: Path = typer.Option("config/voice1.yaml", "--config", "-c", help="Path to config file"),
+    phrases_file: Path = typer.Option(None, "--phrases-file", help="File with phrases to generate (one per line)"),
+    model_name: str = typer.Option(None, "--model-name", help="Model name (default: voice_id-quality)"),
+):
+    """Generate evaluation samples from exported model."""
+    console.print("[bold blue]Generating evaluation samples...[/bold blue]")
+    cfg = load_config(config)
+
+    phrases = None
+    if phrases_file and phrases_file.exists():
+        with open(phrases_file, "r", encoding="utf-8") as f:
+            phrases = [line.strip() for line in f if line.strip()]
+
+    from tools.eval_model import eval_model
+
+    try:
+        eval_model(cfg, phrases, model_name)
+        console.print("[green]Evaluation samples generated![/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+if __name__ == "__main__":
+    app()
+

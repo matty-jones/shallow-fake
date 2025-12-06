@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# Data directories
+data_raw/
+data_processed/
+datasets/
+tms_workspace/
+models/
+samples/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Checkpoints and models
+*.ckpt
+*.onnx
+*.onnx.json
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+

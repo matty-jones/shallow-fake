@@ -1,0 +1,272 @@
+"""Phoneme-based sanity checker for dataset quality."""
+
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import List, Tuple
+
+from faster_whisper import WhisperModel
+from piper_phonemize import phonemize_espeak
+
+from shallow_fake.config import VoiceConfig
+from shallow_fake.utils import ensure_dir, setup_logging
+
+logger = setup_logging()
+
+
+def phonemize_text(text: str, language: str) -> str:
+    """Convert text to phoneme sequence using piper-phonemize."""
+    try:
+        phonemes = phonemize_espeak(text, language=language)
+        return " ".join(phonemes)
+    except Exception as e:
+        logger.error(f"Error phonemizing text '{text}': {e}")
+        return ""
+
+
+def synthesize_with_piper(text: str, piper_model_path: str, output_path: Path) -> bool:
+    """Synthesize text using Piper TTS."""
+    try:
+        # Use piper command-line tool to synthesize
+        # Format: echo "text" | piper --model model.onnx --output_file output.wav
+        cmd = [
+            "piper",
+            "--model", piper_model_path,
+            "--output_file", str(output_path),
+        ]
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate(input=text)
+        if process.returncode != 0:
+            logger.error(f"Piper synthesis failed: {stderr}")
+            return False
+        return output_path.exists()
+    except FileNotFoundError:
+        logger.error("piper command not found. Please install piper-tts.")
+        return False
+    except Exception as e:
+        logger.error(f"Error synthesizing with Piper: {e}")
+        return False
+
+
+def transcribe_with_whisper(audio_path: Path, model_size: str = "base.en", device: str = "cpu") -> str:
+    """Transcribe audio using Whisper."""
+    try:
+        model = WhisperModel(model_size, device=device, compute_type="int8")
+        segments, _ = model.transcribe(str(audio_path), language="en")
+        # Concatenate all segments
+        text = " ".join(segment.text for segment in segments)
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Error transcribing with Whisper: {e}")
+        return ""
+
+
+def normalized_edit_distance(s1: str, s2: str) -> float:
+    """Compute normalized Levenshtein distance between two strings."""
+    if not s1 and not s2:
+        return 0.0
+    if not s1 or not s2:
+        return 1.0
+
+    # Convert to lists of tokens (phonemes)
+    tokens1 = s1.split()
+    tokens2 = s2.split()
+
+    # Levenshtein distance
+    m, n = len(tokens1), len(tokens2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if tokens1[i - 1] == tokens2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = min(
+                    dp[i - 1][j] + 1,  # deletion
+                    dp[i][j - 1] + 1,  # insertion
+                    dp[i - 1][j - 1] + 1,  # substitution
+                )
+
+    max_len = max(m, n)
+    return dp[m][n] / max_len if max_len > 0 else 0.0
+
+
+def verify_dataset_entry(
+    canonical_text: str,
+    audio_path: Path,
+    config: VoiceConfig,
+    baseline_piper_model: str = None,
+    use_tts_roundtrip: bool = True,
+) -> Tuple[bool, float, str]:
+    """
+    Verify a dataset entry using phoneme comparison.
+
+    Returns: (is_valid, phoneme_distance, whisper_text)
+    """
+    if use_tts_roundtrip and baseline_piper_model:
+        # Synthesize canonical text with baseline Piper
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            synth_path = Path(tmp.name)
+
+        if not synthesize_with_piper(canonical_text, baseline_piper_model, synth_path):
+            logger.warning(f"Failed to synthesize text, skipping verification")
+            return False, 1.0, ""
+
+        # Transcribe synthesized audio
+        whisper_text = transcribe_with_whisper(
+            synth_path,
+            model_size="base.en",
+            device="cpu",  # Use CPU for quick verification
+        )
+        synth_path.unlink()  # Clean up
+    else:
+        # Use the actual audio file
+        whisper_text = transcribe_with_whisper(
+            audio_path,
+            model_size="base.en",
+            device="cpu",
+        )
+
+    if not whisper_text:
+        logger.warning(f"Failed to transcribe audio, skipping verification")
+        return False, 1.0, ""
+
+    # Phonemize both texts
+    canonical_phonemes = phonemize_text(canonical_text, config.phoneme_check.language)
+    whisper_phonemes = phonemize_text(whisper_text, config.phoneme_check.language)
+
+    if not canonical_phonemes or not whisper_phonemes:
+        logger.warning(f"Failed to phonemize text, skipping verification")
+        return False, 1.0, whisper_text
+
+    # Compute distance
+    distance = normalized_edit_distance(canonical_phonemes, whisper_phonemes)
+    is_valid = distance <= config.phoneme_check.max_phoneme_distance
+
+    return is_valid, distance, whisper_text
+
+
+def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
+    """Verify dataset using phoneme-based quality checks."""
+    real_dataset_dir = config.paths.real_dataset_dir
+    metadata_csv = real_dataset_dir / "metadata.csv"
+    wavs_dir = real_dataset_dir / "wavs"
+
+    if not metadata_csv.exists():
+        logger.error(f"Metadata file not found: {metadata_csv}")
+        raise FileNotFoundError(f"Metadata file not found: {metadata_csv}")
+
+    # Create cleaned dataset directory
+    cleaned_dir = real_dataset_dir.parent / f"{real_dataset_dir.name}_clean"
+    cleaned_wavs_dir = cleaned_dir / "wavs"
+    cleaned_metadata_csv = cleaned_dir / "metadata.csv"
+    ensure_dir(cleaned_wavs_dir)
+
+    # Read metadata
+    entries = []
+    with open(metadata_csv, "r", encoding="utf-8") as f:
+        for line in f:
+            if "|" in line:
+                parts = line.strip().split("|", 1)
+                if len(parts) == 2:
+                    wav_path, text = parts
+                    entries.append((wav_path, text))
+
+    logger.info(f"Verifying {len(entries)} dataset entries")
+
+    valid_entries = []
+    invalid_entries = []
+    distances = []
+
+    for i, (wav_path, text) in enumerate(entries):
+        if (i + 1) % 10 == 0:
+            logger.info(f"Processing entry {i + 1}/{len(entries)}")
+
+        audio_path = wavs_dir / Path(wav_path).name
+        if not audio_path.exists():
+            logger.warning(f"Audio file not found: {audio_path}")
+            continue
+
+        is_valid, distance, whisper_text = verify_dataset_entry(
+            text,
+            audio_path,
+            config,
+            baseline_piper_model,
+            config.phoneme_check.use_tts_roundtrip,
+        )
+
+        distances.append(distance)
+
+        if is_valid:
+            # Copy to cleaned dataset
+            dest_wav = cleaned_wavs_dir / audio_path.name
+            shutil.copy2(audio_path, dest_wav)
+            valid_entries.append((wav_path, text))
+        else:
+            invalid_entries.append((wav_path, text, distance, whisper_text))
+
+    # Write cleaned metadata
+    logger.info(f"Writing cleaned metadata with {len(valid_entries)} entries")
+    with open(cleaned_metadata_csv, "w", encoding="utf-8") as f:
+        for wav_path, text in valid_entries:
+            f.write(f"{wav_path}|{text}\n")
+
+    # Generate report
+    logger.info("=" * 60)
+    logger.info("Phoneme Verification Report")
+    logger.info("=" * 60)
+    logger.info(f"Total entries: {len(entries)}")
+    logger.info(f"Valid entries: {len(valid_entries)}")
+    logger.info(f"Rejected entries: {len(invalid_entries)}")
+    if distances:
+        logger.info(f"Average phoneme distance: {sum(distances) / len(distances):.4f}")
+        logger.info(f"Min distance: {min(distances):.4f}")
+        logger.info(f"Max distance: {max(distances):.4f}")
+    logger.info(f"Cleaned dataset: {cleaned_dir}")
+    logger.info("=" * 60)
+
+    if invalid_entries:
+        logger.info(f"\nRejected entries (first 10):")
+        for wav_path, text, distance, whisper_text in invalid_entries[:10]:
+            logger.info(f"  {wav_path}: distance={distance:.4f}")
+            logger.info(f"    Original: {text}")
+            logger.info(f"    Whisper:  {whisper_text}")
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    if len(sys.argv) < 2:
+        print("Usage: python verify_phonemes.py <config_path> [--baseline-model <path>]")
+        sys.exit(1)
+
+    config_path = Path(sys.argv[1])
+    config = VoiceConfig.from_yaml(config_path)
+    config.ensure_directories()
+
+    baseline_model = None
+    args = sys.argv[2:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--baseline-model" and i + 1 < len(args):
+            baseline_model = args[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    verify_dataset(config, baseline_model)
+
