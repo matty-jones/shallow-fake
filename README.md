@@ -16,12 +16,12 @@ ShallowFaker provides a repeatable, low-touch pipeline that:
 ## Requirements
 
 - Python 3.10 or 3.11
-- Docker and NVIDIA Container Toolkit (for GPU training and XTTS teacher service)
+- Docker and NVIDIA Container Toolkit (for GPU training and teacher model service)
 - ffmpeg (for audio processing)
 - TextyMcSpeechy Docker image
 - Baseline Piper checkpoints
 - CUDA and cuDNN (for GPU-accelerated ASR) - see [CUDA_SETUP.md](CUDA_SETUP.md) for installation help
-- Coqui TTS (installed automatically in XTTS teacher Docker container)
+- Coqui TTS (installed automatically in teacher model Docker container)
 
 ## Installation
 
@@ -71,7 +71,7 @@ shallow-fake status                 # Show pipeline progress and status
 shallow-fake asr-segment            # Run ASR + segmentation
 shallow-fake build-dataset          # Build real dataset
 shallow-fake verify                 # Run phoneme sanity check
-shallow-fake build-synth            # Generate synthetic dataset (starts XTTS teacher automatically if configured)
+shallow-fake build-synth            # Generate synthetic dataset (starts teacher model service automatically if configured)
 shallow-fake combine                # Merge datasets
 shallow-fake train                  # Launch TMS training container
 shallow-fake monitor                # Monitor training progress
@@ -95,7 +95,7 @@ shallow-fake asr-segment --config claudia.yaml --cpu
 ```
 This is useful if you encounter CUDA/cuDNN issues and want to use CPU without editing the config file.
 
-**XTTS Teacher Integration**: The `build-synth` command automatically starts an XTTS v2 teacher service (if configured) to generate high-quality synthetic voice data. The service:
+**Teacher Model Integration**: The `build-synth` command automatically starts a teacher model service (if configured) to generate high-quality synthetic voice data. The service:
 - Uses reference audio from your cleaned real dataset (`datasets/<project_name>/real_clean/wavs`)
 - Starts automatically when `build-synth` runs
 - Stops automatically after synthetic data generation completes
@@ -112,9 +112,9 @@ This is useful if you encounter CUDA/cuDNN issues and want to use CPU without ed
 - `datasets/<project_name>/` - Real, synthetic, and combined datasets (organized by project)
 - `tms_workspace/` - TMS training workspace (shared)
 - `models/<project_name>/` - Final exported ONNX models (organized by project)
-- `models/xtts_baseline/` - XTTS baseline model cache (shared across all projects)
+- `models/xtts_baseline/` - Teacher model baseline cache (shared across all projects, note: directory name remains xtts_baseline for compatibility)
 - `samples/<project_name>/` - Evaluation audio samples (organized by project)
-- `services/` - XTTS teacher service implementation
+- `services/` - Teacher model service implementation
 
 ## Documentation
 

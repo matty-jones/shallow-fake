@@ -1,10 +1,11 @@
-"""XTTS Teacher FastAPI server for synthetic data generation."""
+"""Teacher model FastAPI server for synthetic data generation."""
 
 import logging
 import os
 import random
 import sys
 import tempfile
+import threading
 import traceback
 from functools import lru_cache
 from io import StringIO
@@ -15,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-# Patch torch.load to allow loading XTTS checkpoints (PyTorch 2.6+ requires weights_only=False)
+# Patch torch.load to allow loading teacher model checkpoints (PyTorch 2.6+ requires weights_only=False)
 # This is safe since we're loading trusted Coqui TTS models
 try:
     import torch
@@ -61,7 +62,10 @@ else:
         w.strip() for w in SPEAKER_WAVS.split(",") if w.strip()
     ]
 
-app = FastAPI(title="XTTS Teacher Server")
+app = FastAPI(title="Teacher Model Server")
+
+# Lock to prevent concurrent model access (XTTS may not be fully thread-safe)
+_model_lock = threading.Lock()
 
 
 class TTSRequest(BaseModel):
@@ -74,7 +78,7 @@ class TTSRequest(BaseModel):
 
 @lru_cache(maxsize=1)
 def get_tts_model() -> TTS:
-    """Load the XTTS model once per process."""
+    """Load the teacher model once per process."""
     use_gpu = DEVICE == "cuda"
     
     # Model cache is mounted at ~/tts from host's models/xtts_baseline/tts
@@ -143,17 +147,54 @@ def get_tts_model() -> TTS:
         sys.stdin = fake_input
         
         # Initialize TTS - it should use the cached model if available
-        # Use device parameter instead of deprecated gpu parameter
+        # Check CUDA availability first
         device = "cuda" if use_gpu else "cpu"
+        cuda_available = False
+        gpu_name = None
+        
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+            if use_gpu and not cuda_available:
+                logger.warning("CUDA requested but not available, falling back to CPU")
+                device = "cpu"
+            elif use_gpu and cuda_available:
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.info(f"CUDA is available. GPU: {gpu_name}")
+        except ImportError:
+            logger.warning("Could not import torch to check CUDA availability")
+            device = "cpu"
+        
         logger.info(f"Initializing TTS with model_name='{MODEL_NAME}', device={device}")
-        tts = TTS(MODEL_NAME)
-        # Move to device after initialization
-        if use_gpu:
+        
+        # Initialize TTS with device parameter (TTS API supports this)
+        try:
+            tts = TTS(MODEL_NAME, gpu=(device == "cuda"))
+        except Exception as e:
+            logger.warning(f"Failed to initialize TTS with GPU, trying CPU: {e}")
+            tts = TTS(MODEL_NAME, gpu=False)
+            device = "cpu"
+        
+        # Verify model is actually on GPU
+        if device == "cuda" and cuda_available:
             try:
-                tts.to(device)
-                logger.info(f"Model moved to {device}")
+                import torch
+                # Check if the model's device is actually CUDA
+                if hasattr(tts, 'synthesizer') and hasattr(tts.synthesizer, 'tts_model'):
+                    model_device = next(tts.synthesizer.tts_model.parameters()).device
+                    logger.info(f"Model device verified: {model_device}")
+                    if str(model_device) not in ["cuda", "cuda:0"]:
+                        logger.warning(f"Model device is {model_device}, expected cuda. GPU acceleration may not be active.")
+                    else:
+                        logger.info(f"✓ GPU acceleration ACTIVE - Model on {model_device}, GPU: {gpu_name}")
+                else:
+                    # Try alternative method to check device
+                    logger.info("Could not directly verify model device, but GPU initialization succeeded")
             except Exception as e:
-                logger.warning(f"Failed to move model to {device}, using CPU: {e}")
+                logger.warning(f"Could not verify model device: {e}")
+        else:
+            logger.info(f"Using CPU for inference (device={device})")
+        
         logger.info("TTS model loaded successfully")
         return tts
     except EOFError as e:
@@ -178,26 +219,25 @@ def get_tts_model() -> TTS:
         sys.stdin = StringIO("y\n")
         try:
             device = "cuda" if use_gpu else "cpu"
-            tts = TTS(MODEL_NAME)
-            if use_gpu:
-                try:
-                    tts.to(device)
-                except Exception:
-                    logger.warning("Failed to move model to GPU, using CPU")
+            try:
+                tts = TTS(MODEL_NAME, gpu=(device == "cuda"))
+            except Exception:
+                logger.warning("Failed to initialize TTS with GPU, using CPU")
+                tts = TTS(MODEL_NAME, gpu=False)
             return tts
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load XTTS model after TOS setup: {str(e)}. "
+                detail=f"Failed to load teacher model after TOS setup: {str(e)}. "
                 "Please check container logs for more details."
             )
     except Exception as e:
         error_trace = traceback.format_exc()
-        logger.error(f"Failed to load XTTS model: {str(e)}")
+        logger.error(f"Failed to load teacher model: {str(e)}")
         logger.error(f"Traceback: {error_trace}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load XTTS model: {str(e)}. Check container logs for details."
+            detail=f"Failed to load teacher model: {str(e)}. Check container logs for details."
         )
     finally:
         # Restore original stdin
@@ -205,15 +245,28 @@ def get_tts_model() -> TTS:
 
 
 def get_reference_audio_files(num_clips: int = 3) -> List[str]:
-    """Select reference audio files for synthesis."""
+    """
+    Select reference audio files for synthesis.
+    
+    Args:
+        num_clips: Number of clips to select. If 0, uses all available clips.
+                   If greater than available clips, uses all available.
+    
+    Returns:
+        List of selected reference audio file paths
+    """
     if not SPEAKER_WAV_LIST:
         raise HTTPException(
             status_code=500,
             detail="No reference audio files found. Check XTTS_SPEAKER_WAVS environment variable.",
+            # Note: Environment variable name remains XTTS-specific for compatibility
         )
 
+    # If num_clips is 0, use all available files
+    if num_clips == 0:
+        selected = SPEAKER_WAV_LIST
     # If we have fewer files than requested, use all available
-    if len(SPEAKER_WAV_LIST) <= num_clips:
+    elif len(SPEAKER_WAV_LIST) <= num_clips:
         selected = SPEAKER_WAV_LIST
     else:
         # Randomly select N files
@@ -232,7 +285,7 @@ def get_reference_audio_files(num_clips: int = 3) -> List[str]:
 
 @app.post("/tts")
 def tts_endpoint(req: TTSRequest):
-    """Generate speech from text using XTTS with reference audio."""
+    """Generate speech from text using teacher model with reference audio."""
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=400, detail="Text is empty")
 
@@ -241,31 +294,55 @@ def tts_endpoint(req: TTSRequest):
 
     try:
         # Get reference audio files (use config default, can be overridden per request)
-        num_reference_clips = req.num_reference_clips or NUM_REFERENCE_CLIPS
-        logger.info(f"Getting {num_reference_clips} reference audio files...")
+        num_reference_clips = req.num_reference_clips if req.num_reference_clips is not None else NUM_REFERENCE_CLIPS
+        if num_reference_clips == 0:
+            logger.info(f"Using all {len(SPEAKER_WAV_LIST)} available reference audio files...")
+        else:
+            logger.info(f"Getting {num_reference_clips} reference audio files from {len(SPEAKER_WAV_LIST)} available files...")
         speaker_wavs = get_reference_audio_files(num_reference_clips)
-        logger.info(f"Using {len(speaker_wavs)} reference audio files: {speaker_wavs}")
+        # Log just the filenames for readability
+        file_names = [os.path.basename(f) for f in speaker_wavs]
+        logger.info(f"Using {len(speaker_wavs)} reference audio files: {file_names}")
 
-        logger.info("Loading XTTS model...")
+        # Model is cached, so this is just retrieving the cached instance
         tts = get_tts_model()
-        logger.info("XTTS model loaded successfully")
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             output_path = tmp.name
 
         logger.info(f"Generating speech for text: {req.text[:50]}...")
         
-        # XTTS can accept a list of speaker WAVs or a single file
-        # Pass the list directly - XTTS will use them for conditioning
+        # Teacher model can accept a list of speaker WAVs or a single file
+        # Pass the list directly - the model will use them for conditioning
         speaker_wav = speaker_wavs if len(speaker_wavs) > 1 else speaker_wavs[0]
 
-        tts.tts_to_file(
-            text=req.text,
-            file_path=output_path,
-            speaker_wav=speaker_wav,
-            language=language,
-            split_sentences=True,
-        )
+        # Use lock to prevent concurrent model access (XTTS may not be fully thread-safe)
+        with _model_lock:
+            # Log GPU usage before inference
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    gpu_memory_before = torch.cuda.memory_allocated(0) / 1024**3  # GB
+                    logger.debug(f"GPU memory before inference: {gpu_memory_before:.2f} GB")
+            except Exception:
+                pass
+            
+            tts.tts_to_file(
+                text=req.text,
+                file_path=output_path,
+                speaker_wav=speaker_wav,
+                language=language,
+                split_sentences=True,
+            )
+            
+            # Log GPU usage after inference
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    gpu_memory_after = torch.cuda.memory_allocated(0) / 1024**3  # GB
+                    logger.debug(f"GPU memory after inference: {gpu_memory_after:.2f} GB")
+            except Exception:
+                pass
 
         logger.info(f"Speech generated successfully, reading audio file...")
         
@@ -278,7 +355,7 @@ def tts_endpoint(req: TTSRequest):
         output_path = None
 
         logger.info(f"Returning audio response ({len(audio)} bytes)")
-        # XTTS outputs 24 kHz mono WAV by default
+        # Teacher model outputs 24 kHz mono WAV by default
         return Response(content=audio, media_type="audio/wav")
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -306,10 +383,24 @@ def tts_endpoint(req: TTSRequest):
 @app.get("/health")
 def health_check():
     """Health check endpoint - doesn't load model, just confirms server is running."""
+    # Check CUDA availability
+    cuda_available = False
+    gpu_name = None
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        if cuda_available:
+            gpu_name = torch.cuda.get_device_name(0)
+    except ImportError:
+        pass
+    
     return {
         "status": "ok",
         "model": MODEL_NAME,
         "device": DEVICE,
+        "cuda_available": cuda_available,
+        "gpu_name": gpu_name,
         "speaker_files": len(SPEAKER_WAV_LIST),
+        "num_reference_clips": NUM_REFERENCE_CLIPS,
     }
 

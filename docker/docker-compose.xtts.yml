@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   xtts-teacher:
     build:
@@ -8,16 +6,22 @@ services:
     container_name: "${VOICE_ID:-voice1}_xtts_teacher"
     restart: unless-stopped
 
-    # GPU wiring is environment-dependent; add runtime: nvidia if GPU is available
-    # For now we pass device choice via env and let TTS(api) pick CPU/GPU.
+    # GPU passthrough configuration using CDI
+    devices:
+      - "nvidia.com/gpu=all"
+    
     environment:
       VOICE_ID: "${VOICE_ID:-voice1}"
       XTTS_MODEL_NAME: "${XTTS_MODEL_NAME:-tts_models/multilingual/multi-dataset/xtts_v2}"
       XTTS_SPEAKER_WAVS: "${XTTS_SPEAKER_WAVS}"
       XTTS_LANGUAGE: "${XTTS_LANGUAGE:-en}"
       XTTS_DEVICE: "${XTTS_DEVICE:-cuda}"
+      XTTS_NUM_REFERENCE_CLIPS: "${XTTS_NUM_REFERENCE_CLIPS:-3}"
       COQUI_TOS_AGREED: "1"  # Auto-accept Terms of Service for non-interactive use
       TTS_HOME: "/root"  # TTS will use /root/tts/ (where we mount the cache)
+      # CDI GPU passthrough environment variables
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
 
     volumes:
       # Host directory with speaker reference WAVs

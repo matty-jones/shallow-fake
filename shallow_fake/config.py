@@ -48,8 +48,8 @@ class TTSHTTPConfig(BaseModel):
     voice_id: str
 
 
-class XTTSTeacherConfig(BaseModel):
-    """XTTS teacher service configuration."""
+class TeacherConfig(BaseModel):
+    """Teacher model service configuration."""
 
     kind: Literal["xtts"] = Field(default="xtts")
     port: int = Field(default=9010, ge=1024, le=65535)
@@ -57,7 +57,7 @@ class XTTSTeacherConfig(BaseModel):
     language: str = Field(default="en")
     device: Literal["cuda", "cpu"] = Field(default="cuda")
     reference_audio_dir: Path
-    num_reference_clips: int = Field(default=3, ge=1)
+    num_reference_clips: int = Field(default=3, ge=0, description="Number of reference clips to use. Set to 0 to use all available clips.")
 
     @field_validator("reference_audio_dir", mode="before")
     @classmethod
@@ -76,7 +76,7 @@ class SyntheticConfig(BaseModel):
     max_sentences: int = Field(default=2000, ge=0)
     tts_backend: Literal["http"] = Field(default="http")
     tts_http: TTSHTTPConfig
-    teacher: Optional[XTTSTeacherConfig] = Field(default=None)
+    teacher: Optional[TeacherConfig] = Field(default=None)
     max_parallel_jobs: int = Field(default=4, ge=1)
 
 

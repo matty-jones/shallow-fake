@@ -33,13 +33,17 @@ class HTTPTTSBackend(TTSBackend):
     def __init__(self, base_url: str, voice_id: str):
         self.base_url = base_url.rstrip("/")
         self.voice_id = voice_id
+        # Create a session for connection pooling
+        self.session = requests.Session()
 
     def generate(self, text: str, output_path: Path) -> bool:
         """Generate audio via HTTP API."""
         try:
             url = f"{self.base_url}"
             params = {"text": text, "voice": self.voice_id}
-            response = requests.post(url, json=params, timeout=30)
+            # Increased timeout for longer sentences (120 seconds)
+            # Use session for connection pooling
+            response = self.session.post(url, json=params, timeout=120)
             response.raise_for_status()
 
             # Save audio (assuming response is audio data)
@@ -47,6 +51,18 @@ class HTTPTTSBackend(TTSBackend):
                 f.write(response.content)
 
             return output_path.exists()
+        except requests.exceptions.HTTPError as e:
+            # Log more details for 500 errors
+            if e.response.status_code == 500:
+                logger.error(f"HTTP TTS 500 error for text '{text[:50]}...': {e}")
+                try:
+                    error_detail = e.response.json().get("detail", "No details available")
+                    logger.error(f"Server error details: {error_detail}")
+                except Exception:
+                    logger.error(f"Server response: {e.response.text[:200]}")
+            else:
+                logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
+            return False
         except Exception as e:
             logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
             return False
@@ -233,18 +249,25 @@ def build_synthetic_dataset(config: VoiceConfig):
         logger.error("No sentences loaded from corpus")
         return
 
-    # Start XTTS teacher service if configured
+    # Start teacher model service if configured
     xtts_teacher_started = False
     if config.synthetic.teacher and config.synthetic.teacher.kind == "xtts":
         try:
             from tools.xtts_teacher_orchestration import start_xtts_teacher, stop_xtts_teacher
 
-            logger.info("Starting XTTS teacher service...")
+            logger.info("Starting teacher model service...")
+            teacher_config = config.synthetic.teacher
+            if teacher_config:
+                num_clips = teacher_config.num_reference_clips
+                if num_clips == 0:
+                    logger.info(f"Teacher model configured to use ALL available reference audio files")
+                else:
+                    logger.info(f"Teacher model configured to use {num_clips} reference audio files per request")
             start_xtts_teacher(config)
             xtts_teacher_started = True
-            logger.info("XTTS teacher service started successfully")
+            logger.info("Teacher model service started successfully")
         except Exception as e:
-            logger.error(f"Failed to start XTTS teacher service: {e}")
+            logger.error(f"Failed to start teacher model service: {e}")
             logger.error("Synthetic dataset generation aborted")
             return
 
@@ -302,7 +325,7 @@ def build_synthetic_dataset(config: VoiceConfig):
         logger.info(f"Synthetic dataset built: {len(valid_entries)} entries in {synth_dataset_dir}")
 
     finally:
-        # Stop XTTS teacher service if we started it
+        # Stop teacher model service if we started it
         if xtts_teacher_started:
             try:
                 from tools.xtts_teacher_orchestration import stop_xtts_teacher
@@ -346,11 +369,11 @@ def build_synthetic_dataset(config: VoiceConfig):
                         except Exception:
                             pass
 
-                logger.info("Stopping XTTS teacher service...")
+                logger.info("Stopping teacher model service...")
                 stop_xtts_teacher(config)
-                logger.info("XTTS teacher service stopped")
+                logger.info("Teacher model service stopped")
             except Exception as e:
-                logger.warning(f"Error stopping XTTS teacher service: {e}")
+                logger.warning(f"Error stopping teacher model service: {e}")
 
     # Now run phoneme verification on the synthetic dataset
     logger.info("Running phoneme verification on synthetic dataset...")

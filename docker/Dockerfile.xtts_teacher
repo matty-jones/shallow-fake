@@ -9,6 +9,12 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Install PyTorch with CUDA support first (TTS will use it)
+# Use --extra-index-url so other packages can still be found on PyPI
+RUN pip install --no-cache-dir \
+      torch torchvision torchaudio \
+      --extra-index-url https://download.pytorch.org/whl/cu121
+
 # Install Coqui TTS (includes XTTS v2) and FastAPI/uvicorn HTTP server
 # Pin transformers version to ensure BeamSearchScorer is available (4.30-4.36 range)
 # Install torchcodec for audio loading support
@@ -30,5 +36,8 @@ RUN mkdir -p /root/.local/share/tts && \
     echo "accepted" > /root/.local/share/tts/.coqui_tos
 
 # Default port; overridden by Docker port mapping
-CMD ["uvicorn", "xtts_teacher_server:app", "--host", "0.0.0.0", "--port", "9010"]
+# Using 1 worker to avoid multiple model copies in GPU memory
+# The threading lock in the code serializes requests to prevent model access conflicts
+# For better throughput, consider increasing workers if you have sufficient GPU memory
+CMD ["uvicorn", "xtts_teacher_server:app", "--host", "0.0.0.0", "--port", "9010", "--workers", "1"]
 

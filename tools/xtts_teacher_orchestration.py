@@ -1,4 +1,4 @@
-"""Orchestration helpers for XTTS teacher service."""
+"""Orchestration helpers for teacher model service."""
 
 import random
 import subprocess
@@ -40,13 +40,13 @@ def select_reference_audio(reference_dir: Path, num_clips: int) -> List[Path]:
 
 def start_xtts_teacher(config: VoiceConfig) -> None:
     """
-    Start the XTTS teacher service using Docker Compose.
+    Start the teacher model service using Docker Compose.
 
     Args:
         config: Voice configuration containing teacher settings
     """
     if not config.synthetic.teacher:
-        raise ValueError("XTTS teacher not configured in synthetic.teacher")
+        raise ValueError("Teacher model not configured in synthetic.teacher")
 
     teacher = config.synthetic.teacher
     if teacher.kind != "xtts":
@@ -67,11 +67,11 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
             "Run 'build-dataset' and 'verify' first to create cleaned audio segments."
         )
 
-    logger.info(f"Starting XTTS teacher service for {config.voice_id}...")
+    logger.info(f"Starting teacher model service for {config.voice_id}...")
     logger.info(f"Reference audio directory: {reference_dir}")
     logger.info(f"Found {len(wav_files)} reference WAV files")
 
-    # Ensure XTTS model cache directory exists
+    # Ensure teacher model cache directory exists
     project_root = Path.cwd()
     model_cache_dir = project_root / "models" / "xtts_baseline"
     ensure_dir(model_cache_dir)
@@ -83,9 +83,9 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
     
     if model_file.exists():
         file_size_mb = model_file.stat().st_size / (1024 * 1024)
-        logger.info(f"Found cached XTTS model at {model_path} ({file_size_mb:.0f} MB)")
+        logger.info(f"Found cached teacher model at {model_path} ({file_size_mb:.0f} MB)")
     else:
-        logger.info(f"XTTS model not found in cache at {model_path}")
+        logger.info(f"Teacher model not found in cache at {model_path}")
         logger.info("Pre-downloading model to cache (~1.7GB, one-time download)...")
         
         try:
@@ -122,6 +122,7 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
         f.write(f"REFERENCE_AUDIO_DIR={reference_dir_abs}\n")
         f.write(f"MODEL_CACHE_DIR={model_cache_dir_abs}\n")
         # XTTS_SPEAKER_WAVS will be set to the directory path, server will find WAVs
+        # (Note: Environment variable names remain XTTS-specific for compatibility)
         f.write(f"XTTS_SPEAKER_WAVS=/speakers\n")
 
     # Get docker-compose file path
@@ -131,7 +132,7 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
 
     # Start the service
     try:
-        logger.info("Building and starting XTTS teacher container (this may take a few minutes on first build)...")
+        logger.info("Building and starting teacher model container (this may take a few minutes on first build)...")
         result = subprocess.run(
             [
                 "docker",
@@ -153,9 +154,9 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
             logger.debug(f"Docker compose output: {result.stdout}")
         if result.stderr and result.stderr.strip():
             logger.debug(f"Docker compose stderr: {result.stderr}")
-        logger.info("XTTS teacher container started")
+        logger.info("Teacher model container started")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to start XTTS teacher: {e.stderr}")
+        logger.error(f"Failed to start teacher model service: {e.stderr}")
         raise
 
     # Wait for service to be ready
@@ -163,20 +164,39 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
     max_retries = 60  # Increased to 2 minutes for model download
     retry_delay = 2
 
-    logger.info("Waiting for XTTS teacher service to be ready (this may take a few minutes on first run while model downloads)...")
+    logger.info("Waiting for teacher model service to be ready (this may take a few minutes on first run while model downloads)...")
     
     for attempt in range(max_retries):
         try:
             response = requests.get(f"{base_url}/health", timeout=5)
             if response.status_code == 200:
-                logger.info("XTTS teacher service is ready")
+                health_data = response.json()
+                logger.info("Teacher model service is ready")
+                # Log device and GPU information
+                device = health_data.get("device", "unknown")
+                cuda_available = health_data.get("cuda_available", False)
+                gpu_name = health_data.get("gpu_name")
+                num_clips = health_data.get("num_reference_clips", "unknown")
+                speaker_files = health_data.get("speaker_files", 0)
+                
+                if device == "cuda" and cuda_available:
+                    logger.info(f"GPU acceleration: ENABLED ({gpu_name})")
+                elif device == "cuda" and not cuda_available:
+                    logger.warning(f"GPU acceleration: REQUESTED but CUDA not available, using CPU")
+                else:
+                    logger.info(f"GPU acceleration: DISABLED (using CPU)")
+                
+                if num_clips == 0:
+                    logger.info(f"Reference audio: Using all {speaker_files} available files per request")
+                else:
+                    logger.info(f"Reference audio: Using {num_clips} files per request (from {speaker_files} available)")
                 return
         except requests.exceptions.RequestException as e:
             pass
 
         if attempt < max_retries - 1:
             if attempt % 10 == 0:  # Log every 10 attempts (20 seconds)
-                logger.info(f"Waiting for XTTS teacher service... ({attempt * retry_delay}s elapsed)")
+                logger.info(f"Waiting for teacher model service... ({attempt * retry_delay}s elapsed)")
             time.sleep(retry_delay)
         else:
             # Check container status before raising error
@@ -193,14 +213,14 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
                 pass
             
             raise RuntimeError(
-                f"XTTS teacher service did not become ready after {max_retries * retry_delay} seconds. "
+                f"Teacher model service did not become ready after {max_retries * retry_delay} seconds. "
                 f"Check container logs: docker logs {config.voice_id}_xtts_teacher"
             )
 
 
 def stop_xtts_teacher(config: VoiceConfig) -> None:
     """
-    Stop the XTTS teacher service.
+    Stop the teacher model service.
 
     Args:
         config: Voice configuration containing teacher settings
@@ -209,7 +229,7 @@ def stop_xtts_teacher(config: VoiceConfig) -> None:
         return
 
     teacher = config.synthetic.teacher
-    logger.info(f"Stopping XTTS teacher service for {config.voice_id}...")
+    logger.info(f"Stopping teacher model service for {config.voice_id}...")
 
     project_root = Path.cwd()
     env_file = project_root / f".env.{config.voice_id}.xtts"
@@ -234,9 +254,9 @@ def stop_xtts_teacher(config: VoiceConfig) -> None:
             capture_output=True,
             text=True,
         )
-        logger.info("XTTS teacher container stopped")
+        logger.info("Teacher model container stopped")
     except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to stop XTTS teacher: {e.stderr}")
+        logger.warning(f"Failed to stop teacher model service: {e.stderr}")
 
     # Clean up .env file
     if env_file.exists():
@@ -246,7 +266,7 @@ def stop_xtts_teacher(config: VoiceConfig) -> None:
 
 def is_xtts_teacher_running(config: VoiceConfig) -> bool:
     """
-    Check if the XTTS teacher service is running.
+    Check if the teacher model service is running.
 
     Args:
         config: Voice configuration containing teacher settings

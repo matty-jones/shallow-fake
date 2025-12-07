@@ -168,9 +168,9 @@ def build_synth(
     if cpu:
         console.print("[yellow]Using CPU mode for verification[/yellow]")
 
-    # Check if XTTS teacher is configured
+    # Check if teacher model is configured
     if cfg.synthetic.teacher and cfg.synthetic.teacher.kind == "xtts":
-        console.print("[cyan]XTTS teacher service will be started automatically[/cyan]")
+        console.print("[cyan]Teacher model service will be started automatically[/cyan]")
 
     from tools.build_synthetic_dataset import build_synthetic_dataset
 

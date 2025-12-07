@@ -58,7 +58,8 @@ def initialize_project(project_name: str, base_dir: Path = None):
     if was_new:
         console.print(f"  Created: {external_corpus_dir}")
 
-    # Create XTTS baseline model directory (universal across all projects)
+    # Create teacher model baseline directory (universal across all projects)
+    # Note: Directory name remains xtts_baseline for compatibility with existing setups
     xtts_baseline_dir = base_dir / "models" / "xtts_baseline"
     was_new_xtts = not xtts_baseline_dir.exists()
     ensure_dir(xtts_baseline_dir)

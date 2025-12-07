@@ -1,25 +1,24 @@
-version: '3.8'
-
 services:
   tms-trainer:
     image: domesticatedviking/textymcspeechy:piper-latest
     container_name: tms-${PROJECT_NAME}-trainer
     restart: unless-stopped
+    
+    # GPU passthrough configuration using CDI
+    devices:
+      - "nvidia.com/gpu=all"
+    
     environment:
       - TMS_DATASETS=/workspace/datasets
       - TMS_CHECKPOINTS=/workspace/checkpoints
       - TMS_LOGS=/workspace/logs
       - TMS_AUDIO_SAMPLES=/workspace/audio_samples
       - CUDA_VISIBLE_DEVICES=0
+      # CDI GPU passthrough environment variables
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ../tms_workspace:/workspace
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     ports:
       - "6006:6006"   # TensorBoard
       - "8765:8765"   # TMS web UI (if present)

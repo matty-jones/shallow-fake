@@ -36,7 +36,7 @@ synthetic:
     language: en
     device: cuda
     reference_audio_dir: datasets/claudia/real_clean/wavs
-    num_reference_clips: 3
+    num_reference_clips: 0
   max_parallel_jobs: 4
 training:
   base_checkpoint: en_GB-base-medium.ckpt
