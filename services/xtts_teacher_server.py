@@ -67,11 +67,12 @@ else:
 
 app = FastAPI(title="Teacher Model Server")
 
-# Note: Removed threading lock to allow parallel request processing
-# XTTS appears to handle concurrent requests safely when using multiple uvicorn workers
-# If you encounter errors, you can re-enable the lock by uncommenting the line below
-# and wrapping the tts.tts_to_file() call with: with _model_lock:
-# _model_lock = threading.Lock()
+# Threading lock to serialize model access within each worker process
+# XTTS model is not thread-safe for concurrent inference - even with multiple uvicorn workers,
+# FastAPI can handle multiple concurrent requests per worker, causing CUDA device-side assert errors
+# This lock ensures only one inference happens at a time per worker process
+import threading
+_model_lock = threading.Lock()
 
 
 class TTSRequest(BaseModel):
@@ -349,14 +350,17 @@ def tts_endpoint(req: TTSRequest):
         except Exception as e:
             logger.debug(f"Could not get GPU memory info: {e}")
         
-        # Generate speech (lock removed for parallel processing with multiple workers)
-        tts.tts_to_file(
-            text=req.text,
-            file_path=output_path,
-            speaker_wav=speaker_wav,
-            language=language,
-            split_sentences=True,
-        )
+        # Generate speech with lock to prevent CUDA device-side assert errors
+        # The XTTS model is not thread-safe for concurrent inference
+        # Multiple uvicorn workers provide parallelism at the process level
+        with _model_lock:
+            tts.tts_to_file(
+                text=req.text,
+                file_path=output_path,
+                speaker_wav=speaker_wav,
+                language=language,
+                split_sentences=True,
+            )
         
         # Clear GPU cache after inference to reduce fragmentation and prevent OOM
         try:

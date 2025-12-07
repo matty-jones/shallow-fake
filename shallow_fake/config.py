@@ -39,6 +39,7 @@ class PhonemeCheckConfig(BaseModel):
     language: str = Field(default="en-gb")
     max_phoneme_distance: float = Field(default=0.1, ge=0.0, le=1.0)
     use_tts_roundtrip: bool = Field(default=True)
+    parallel_workers: int = Field(default=4, ge=1, le=16, description="Number of parallel workers for verification. Each worker loads its own Whisper model (~500MB RAM per worker).")
 
 
 class TTSHTTPConfig(BaseModel):

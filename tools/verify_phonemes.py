@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
@@ -14,6 +16,12 @@ from shallow_fake.config import VoiceConfig
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
+
+# Thread-local storage for Whisper models (one per worker thread)
+_thread_local = threading.local()
+# Lock for model initialization to prevent CUDA kernel errors
+# when multiple threads try to initialize models simultaneously
+_model_init_lock = threading.Lock()
 
 
 def phonemize_text(text: str, language: str) -> str:
@@ -64,13 +72,34 @@ def synthesize_with_piper(text: str, piper_model_path: str, output_path: Path) -
         return False
 
 
+def get_whisper_model(model_size: str = "base.en", device: str = "cpu") -> WhisperModel:
+    """Get or create a Whisper model for the current thread (thread-local)."""
+    # Use device as part of the cache key to support both CPU and CUDA models
+    cache_key = f"{model_size}_{device}"
+    
+    if not hasattr(_thread_local, 'whisper_models'):
+        _thread_local.whisper_models = {}
+    
+    if cache_key not in _thread_local.whisper_models:
+        # Use lock to serialize model initialization and prevent CUDA kernel errors
+        # when multiple threads try to initialize models simultaneously
+        with _model_init_lock:
+            # Double-check after acquiring lock (another thread might have initialized)
+            if cache_key not in _thread_local.whisper_models:
+                # Use appropriate compute type based on device
+                compute_type = "float16" if device == "cuda" else "int8"
+                _thread_local.whisper_models[cache_key] = WhisperModel(
+                    model_size, 
+                    device=device, 
+                    compute_type=compute_type
+                )
+    return _thread_local.whisper_models[cache_key]
+
+
 def transcribe_with_whisper(audio_path: Path, model_size: str = "base.en", device: str = "cpu") -> str:
-    """Transcribe audio using Whisper."""
+    """Transcribe audio using Whisper (reuses thread-local model)."""
     try:
-        # Always use CPU for verification to avoid CUDA issues
-        # Verification is quick and doesn't need GPU speed
-        actual_device = "cpu"
-        model = WhisperModel(model_size, device=actual_device, compute_type="int8")
+        model = get_whisper_model(model_size, device)
         segments, _ = model.transcribe(str(audio_path), language="en")
         # Concatenate all segments
         text = " ".join(segment.text for segment in segments)
@@ -137,18 +166,22 @@ def verify_dataset_entry(
             return False, 1.0, ""
 
         # Transcribe synthesized audio
+        # Use config device (default to CPU for safety, but allow CUDA if configured)
+        device = getattr(config.asr, 'device', 'cpu')
         whisper_text = transcribe_with_whisper(
             synth_path,
             model_size="base.en",
-            device="cpu",  # Use CPU for quick verification
+            device=device,
         )
         synth_path.unlink()  # Clean up
     else:
         # Use the actual audio file
+        # Use config device (default to CPU for safety, but allow CUDA if configured)
+        device = getattr(config.asr, 'device', 'cpu')
         whisper_text = transcribe_with_whisper(
             audio_path,
             model_size="base.en",
-            device="cpu",
+            device=device,
         )
 
     if not whisper_text:
@@ -170,8 +203,33 @@ def verify_dataset_entry(
     return is_valid, distance, whisper_text
 
 
+def verify_entry_worker(
+    entry_data: Tuple[int, str, Path, Path, VoiceConfig, str, bool]
+) -> Tuple[int, bool, float, str, str, Path]:
+    """
+    Worker function for parallel verification.
+    
+    Returns: (index, is_valid, distance, whisper_text, wav_path, audio_path)
+    """
+    i, wav_path, text, audio_path, config, baseline_piper_model, use_tts_roundtrip = entry_data
+    
+    if not audio_path.exists():
+        logger.warning(f"Audio file not found: {audio_path}")
+        return (i, False, 1.0, "", wav_path, audio_path)
+    
+    is_valid, distance, whisper_text = verify_dataset_entry(
+        text,
+        audio_path,
+        config,
+        baseline_piper_model,
+        use_tts_roundtrip,
+    )
+    
+    return (i, is_valid, distance, whisper_text, wav_path, audio_path)
+
+
 def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
-    """Verify dataset using phoneme-based quality checks."""
+    """Verify dataset using phoneme-based quality checks (parallelized)."""
     real_dataset_dir = config.paths.real_dataset_dir
     metadata_csv = real_dataset_dir / "metadata.csv"
     wavs_dir = real_dataset_dir / "wavs"
@@ -197,37 +255,89 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
                     entries.append((wav_path, text))
 
     logger.info(f"Verifying {len(entries)} dataset entries")
+    
+    # Get parallel workers from config
+    num_workers = config.phoneme_check.parallel_workers
+    logger.info(f"Using {num_workers} parallel workers for verification")
+    
+    # Pre-warm Whisper model initialization in main thread to avoid CUDA conflicts
+    # This ensures the library is ready before parallel processing starts
+    device = getattr(config.asr, 'device', 'cpu')
+    compute_type = "float16" if device == "cuda" else "int8"
+    logger.debug(f"Pre-initializing Whisper library on {device}...")
+    try:
+        # Initialize one model in main thread to ensure library is ready
+        # This helps avoid CUDA initialization race conditions when multiple
+        # threads start initializing models simultaneously
+        test_model = WhisperModel("base.en", device=device, compute_type=compute_type)
+        del test_model  # Clean up immediately
+        logger.debug(f"Whisper library pre-initialized on {device}")
+    except Exception as e:
+        logger.warning(f"Could not pre-initialize Whisper library (non-critical): {e}")
 
-    valid_entries = []
-    invalid_entries = []
-    distances = []
-
+    # Prepare entry data for workers (store original text for later use)
+    entry_data_list = []
+    original_texts = {}  # Store original texts by index
     for i, (wav_path, text) in enumerate(entries):
-        if (i + 1) % 10 == 0:
-            logger.info(f"Processing entry {i + 1}/{len(entries)}")
-
         audio_path = wavs_dir / Path(wav_path).name
-        if not audio_path.exists():
-            logger.warning(f"Audio file not found: {audio_path}")
-            continue
-
-        is_valid, distance, whisper_text = verify_dataset_entry(
+        original_texts[i] = text
+        entry_data_list.append((
+            i,
+            wav_path,
             text,
             audio_path,
             config,
             baseline_piper_model,
             config.phoneme_check.use_tts_roundtrip,
-        )
+        ))
 
+    # Process entries in parallel
+    valid_entries = []
+    invalid_entries = []
+    distances = []
+    results_dict = {}  # Store results by index to maintain order
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(verify_entry_worker, entry_data): entry_data[0]
+            for entry_data in entry_data_list
+        }
+        
+        # Process completed tasks
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
+            try:
+                i, is_valid, distance, whisper_text, wav_path, audio_path = future.result()
+                results_dict[i] = (is_valid, distance, whisper_text, wav_path, audio_path)
+                
+                # Log progress every 10 entries or at milestones
+                if completed % 10 == 0 or completed == len(entries):
+                    logger.info(f"Processing entry {completed}/{len(entries)}")
+            except Exception as e:
+                logger.error(f"Error processing entry: {e}")
+                # Mark as invalid
+                original_index = futures[future]
+                results_dict[original_index] = (False, 1.0, "", "", None)
+
+    # Process results in order and copy files
+    for i in range(len(entries)):
+        if i not in results_dict:
+            continue
+            
+        is_valid, distance, whisper_text, wav_path, audio_path = results_dict[i]
+        original_text = original_texts[i]
+        
         distances.append(distance)
-
-        if is_valid:
+        
+        if is_valid and audio_path:
             # Copy to cleaned dataset
             dest_wav = cleaned_wavs_dir / audio_path.name
             shutil.copy2(audio_path, dest_wav)
-            valid_entries.append((wav_path, text))
+            valid_entries.append((wav_path, original_text))
         else:
-            invalid_entries.append((wav_path, text, distance, whisper_text))
+            invalid_entries.append((wav_path, original_text, distance, whisper_text))
 
     # Write cleaned metadata
     logger.info(f"Writing cleaned metadata with {len(valid_entries)} entries")

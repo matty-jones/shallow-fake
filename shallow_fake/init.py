@@ -97,6 +97,7 @@ def initialize_project(project_name: str, base_dir: Path = None):
             "language": "en-gb",
             "max_phoneme_distance": 0.1,
             "use_tts_roundtrip": True,
+            "parallel_workers": 4,
         },
         "synthetic": {
             "enabled": True,
