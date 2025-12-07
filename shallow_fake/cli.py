@@ -286,6 +286,50 @@ def eval(
         raise typer.Exit(1)
 
 
+@app.command()
+def cleanup_docker(
+    all_resources: bool = typer.Option(False, "--all", "-a", help="Also remove unused images, containers, and volumes"),
+):
+    """Clean up Docker build cache and unused resources to free disk space."""
+    import subprocess
+    
+    console.print("[bold blue]Cleaning up Docker resources...[/bold blue]")
+    
+    try:
+        # Always clean build cache
+        console.print("[cyan]Cleaning Docker build cache...[/cyan]")
+        result = subprocess.run(
+            ["docker", "builder", "prune", "-f"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        if result.stdout:
+            console.print(result.stdout)
+        
+        if all_resources:
+            # Also clean unused images, containers, networks, and volumes
+            console.print("[cyan]Cleaning unused Docker resources (images, containers, volumes)...[/cyan]")
+            result = subprocess.run(
+                ["docker", "system", "prune", "-af", "--volumes"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if result.stdout:
+                console.print(result.stdout)
+        else:
+            console.print("[yellow]Use --all to also remove unused images, containers, and volumes[/yellow]")
+        
+        console.print("[green]Docker cleanup complete![/green]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Error cleaning up Docker: {e.stderr}[/red]")
+        raise typer.Exit(1)
+    except FileNotFoundError:
+        console.print("[red]Error: Docker command not found. Please install Docker.[/red]")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
 

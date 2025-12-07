@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -58,6 +58,7 @@ class TeacherConfig(BaseModel):
     device: Literal["cuda", "cpu"] = Field(default="cuda")
     reference_audio_dir: Path
     num_reference_clips: int = Field(default=3, ge=0, description="Number of reference clips to use. Set to 0 to use all available clips.")
+    workers: int = Field(default=3, ge=1, le=20, description="Number of uvicorn workers. Each worker loads its own model copy (~2GB GPU memory per worker). max_parallel_jobs will be auto-set to workers * 2.")
 
     @field_validator("reference_audio_dir", mode="before")
     @classmethod
@@ -77,7 +78,20 @@ class SyntheticConfig(BaseModel):
     tts_backend: Literal["http"] = Field(default="http")
     tts_http: TTSHTTPConfig
     teacher: Optional[TeacherConfig] = Field(default=None)
-    max_parallel_jobs: int = Field(default=4, ge=1)
+    max_parallel_jobs: Optional[int] = Field(default=None, ge=1, description="Number of parallel HTTP requests. If None, auto-calculated as teacher.workers * 2 to keep workers busy with a ready queue.")
+
+    @model_validator(mode="after")
+    def auto_calculate_parallel_jobs(self):
+        """Auto-calculate max_parallel_jobs if not specified."""
+        if self.max_parallel_jobs is not None:
+            return self
+        # Auto-calculate based on teacher workers
+        if self.teacher and hasattr(self.teacher, "workers"):
+            self.max_parallel_jobs = self.teacher.workers * 2
+        else:
+            # Default fallback if no teacher configured
+            self.max_parallel_jobs = 4
+        return self
 
 
 class TrainingConfig(BaseModel):

@@ -115,6 +115,7 @@ def initialize_project(project_name: str, base_dir: Path = None):
                 "device": "cuda",
                 "reference_audio_dir": f"datasets/{project_name}/real_clean/wavs",
                 "num_reference_clips": 3,
+                "workers": 3,
             },
             "max_parallel_jobs": 4,
         },

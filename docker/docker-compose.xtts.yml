@@ -17,11 +17,16 @@ services:
       XTTS_LANGUAGE: "${XTTS_LANGUAGE:-en}"
       XTTS_DEVICE: "${XTTS_DEVICE:-cuda}"
       XTTS_NUM_REFERENCE_CLIPS: "${XTTS_NUM_REFERENCE_CLIPS:-3}"
+      UVICORN_WORKERS: "${UVICORN_WORKERS:-3}"
       COQUI_TOS_AGREED: "1"  # Auto-accept Terms of Service for non-interactive use
       TTS_HOME: "/root"  # TTS will use /root/tts/ (where we mount the cache)
+      # PyTorch memory optimization to reduce fragmentation and prevent CUDA OOM
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       # CDI GPU passthrough environment variables
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    
+    command: ["sh", "-c", "uvicorn xtts_teacher_server:app --host 0.0.0.0 --port 9010 --workers $${UVICORN_WORKERS:-3}"]
 
     volumes:
       # Host directory with speaker reference WAVs

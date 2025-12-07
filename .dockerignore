@@ -1,0 +1,82 @@
+# .dockerignore - Exclude unnecessary files from Docker build context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data directories (not needed in container)
+data_raw/
+data_processed/
+datasets/
+tms_workspace/
+models/
+samples/
+training/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+temp/
+
+# Documentation
+*.md
+!README.md
+PROGRESS.md
+temp/
+
+# Checkpoints and models (not needed in container)
+*.ckpt
+*.onnx
+*.onnx.json
+
+# Environment files
+.env*
+!.env.example
+
+# Docker files (don't need to copy into container)
+docker/
+docker-compose*.yml
+Dockerfile*
+
+# Config files (not needed in container)
+config/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Build artifacts
+*.egg
+*.whl
+shallow_faker.egg-info/
+

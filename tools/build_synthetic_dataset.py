@@ -63,6 +63,11 @@ class HTTPTTSBackend(TTSBackend):
             else:
                 logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
             return False
+        except requests.exceptions.ConnectionError as e:
+            # Connection errors often indicate server crash or overload (e.g., GPU OOM)
+            logger.error(f"HTTP TTS connection error for text '{text[:50]}...': {e}")
+            logger.warning("This may indicate server overload or GPU memory exhaustion. Consider reducing workers.")
+            return False
         except Exception as e:
             logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
             return False
@@ -286,6 +291,8 @@ def build_synthetic_dataset(config: VoiceConfig):
         logger.info(f"Generating {len(sentences)} synthetic entries...")
         valid_entries = []
         max_workers = config.synthetic.max_parallel_jobs
+        if config.synthetic.teacher:
+            logger.info(f"Using {max_workers} parallel jobs (auto-calculated as {config.synthetic.teacher.workers} workers * 2 to keep workers busy)")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {

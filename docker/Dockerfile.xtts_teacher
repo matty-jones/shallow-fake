@@ -1,4 +1,7 @@
-FROM python:3.11-slim
+# Multi-stage build for better layer caching and smaller final image
+
+# Stage 1: Base system dependencies (cached unless base image changes)
+FROM python:3.11-slim as base
 
 # System deps – ffmpeg is useful for audio sanity, certs for HTTPS if needed
 RUN apt-get update && \
@@ -7,10 +10,15 @@ RUN apt-get update && \
       ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# Stage 2: Python dependencies (cached unless PyTorch/TTS versions change)
+# This stage is expensive to rebuild, so we isolate it
+FROM base as deps
+
 WORKDIR /app
 
 # Install PyTorch with CUDA support first (TTS will use it)
 # Use --extra-index-url so other packages can still be found on PyPI
+# PyTorch packages are large (~2-3GB), so this layer is cached separately
 RUN pip install --no-cache-dir \
       torch torchvision torchaudio \
       --extra-index-url https://download.pytorch.org/whl/cu121
@@ -25,7 +33,11 @@ RUN pip install --no-cache-dir \
       fastapi \
       uvicorn[standard]
 
-# Copy server implementation
+# Stage 3: Final image (only rebuilds when server code changes)
+# This stage copies dependencies from deps stage and adds application code
+FROM deps
+
+# Copy server implementation (this is the only layer that changes frequently)
 COPY services/xtts_teacher_server.py .
 
 ENV PYTHONUNBUFFERED=1
@@ -36,8 +48,8 @@ RUN mkdir -p /root/.local/share/tts && \
     echo "accepted" > /root/.local/share/tts/.coqui_tos
 
 # Default port; overridden by Docker port mapping
-# Using 1 worker to avoid multiple model copies in GPU memory
-# The threading lock in the code serializes requests to prevent model access conflicts
-# For better throughput, consider increasing workers if you have sufficient GPU memory
-CMD ["uvicorn", "xtts_teacher_server:app", "--host", "0.0.0.0", "--port", "9010", "--workers", "1"]
+# Workers are now set via docker-compose command override using UVICORN_WORKERS env var
+# This allows per-project configuration via the teacher.workers config field
+# Each worker loads its own model copy (~1.7-2GB GPU memory per worker)
+CMD ["uvicorn", "xtts_teacher_server:app", "--host", "0.0.0.0", "--port", "9010"]
 

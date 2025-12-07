@@ -5,7 +5,6 @@ import os
 import random
 import sys
 import tempfile
-import threading
 import traceback
 from functools import lru_cache
 from io import StringIO
@@ -32,6 +31,10 @@ except ImportError:
     pass  # torch not available yet
 
 from TTS.api import TTS
+
+# Enable PyTorch memory optimization to reduce fragmentation
+# This helps prevent CUDA OOM errors by allowing more efficient memory allocation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -64,8 +67,11 @@ else:
 
 app = FastAPI(title="Teacher Model Server")
 
-# Lock to prevent concurrent model access (XTTS may not be fully thread-safe)
-_model_lock = threading.Lock()
+# Note: Removed threading lock to allow parallel request processing
+# XTTS appears to handle concurrent requests safely when using multiple uvicorn workers
+# If you encounter errors, you can re-enable the lock by uncommenting the line below
+# and wrapping the tts.tts_to_file() call with: with _model_lock:
+# _model_lock = threading.Lock()
 
 
 class TTSRequest(BaseModel):
@@ -79,6 +85,14 @@ class TTSRequest(BaseModel):
 @lru_cache(maxsize=1)
 def get_tts_model() -> TTS:
     """Load the teacher model once per process."""
+    # Clear any existing GPU cache before loading to reduce fragmentation
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    
     use_gpu = DEVICE == "cuda"
     
     # Model cache is mounted at ~/tts from host's models/xtts_baseline/tts
@@ -137,7 +151,8 @@ def get_tts_model() -> TTS:
     else:
         logger.warning(f"Model not found in cache, TTS will download to {model_cache_dir}")
     
-    logger.info(f"Loading TTS model '{MODEL_NAME}' (this may take a moment if verifying cache)...")
+    # Only log model loading on first load (this function is cached, so body only executes once per worker)
+    logger.info(f"Initializing TTS model '{MODEL_NAME}' (this may take a moment on first load)...")
     
     # Redirect stdin to auto-accept TOS prompt if it still appears
     original_stdin = sys.stdin
@@ -316,33 +331,61 @@ def tts_endpoint(req: TTSRequest):
         # Pass the list directly - the model will use them for conditioning
         speaker_wav = speaker_wavs if len(speaker_wavs) > 1 else speaker_wavs[0]
 
-        # Use lock to prevent concurrent model access (XTTS may not be fully thread-safe)
-        with _model_lock:
-            # Log GPU usage before inference
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu_memory_before = torch.cuda.memory_allocated(0) / 1024**3  # GB
-                    logger.debug(f"GPU memory before inference: {gpu_memory_before:.2f} GB")
-            except Exception:
-                pass
-            
-            tts.tts_to_file(
-                text=req.text,
-                file_path=output_path,
-                speaker_wav=speaker_wav,
-                language=language,
-                split_sentences=True,
-            )
-            
-            # Log GPU usage after inference
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu_memory_after = torch.cuda.memory_allocated(0) / 1024**3  # GB
-                    logger.debug(f"GPU memory after inference: {gpu_memory_after:.2f} GB")
-            except Exception:
-                pass
+        # Log detailed GPU memory usage before inference
+        gpu_memory_info_before = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                max_allocated = torch.cuda.max_memory_allocated(device) / 1024**3  # GB
+                gpu_memory_info_before = {
+                    "allocated": allocated,
+                    "reserved": reserved,
+                    "max_allocated": max_allocated
+                }
+                logger.info(f"GPU memory before inference - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB, Max: {max_allocated:.2f} GB")
+        except Exception as e:
+            logger.debug(f"Could not get GPU memory info: {e}")
+        
+        # Generate speech (lock removed for parallel processing with multiple workers)
+        tts.tts_to_file(
+            text=req.text,
+            file_path=output_path,
+            speaker_wav=speaker_wav,
+            language=language,
+            split_sentences=True,
+        )
+        
+        # Clear GPU cache after inference to reduce fragmentation and prevent OOM
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        
+        # Log detailed GPU memory usage after inference
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                max_allocated = torch.cuda.max_memory_allocated(device) / 1024**3  # GB
+                logger.info(f"GPU memory after inference - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB, Max: {max_allocated:.2f} GB")
+                
+                # Calculate delta if we have before info
+                if gpu_memory_info_before:
+                    delta_allocated = allocated - gpu_memory_info_before["allocated"]
+                    delta_reserved = reserved - gpu_memory_info_before["reserved"]
+                    logger.info(f"GPU memory delta - Allocated: {delta_allocated:+.2f} GB, Reserved: {delta_reserved:+.2f} GB")
+                
+                # Reset max memory counter for next request
+                torch.cuda.reset_peak_memory_stats(device)
+        except Exception as e:
+            logger.debug(f"Could not get GPU memory info: {e}")
 
         logger.info(f"Speech generated successfully, reading audio file...")
         
@@ -383,16 +426,33 @@ def tts_endpoint(req: TTSRequest):
 @app.get("/health")
 def health_check():
     """Health check endpoint - doesn't load model, just confirms server is running."""
-    # Check CUDA availability
+    # Check CUDA availability and GPU memory
     cuda_available = False
     gpu_name = None
+    gpu_memory_info = None
+    
     try:
         import torch
         cuda_available = torch.cuda.is_available()
         if cuda_available:
-            gpu_name = torch.cuda.get_device_name(0)
+            device = torch.cuda.current_device()
+            gpu_name = torch.cuda.get_device_name(device)
+            # Get current GPU memory stats
+            allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+            max_allocated = torch.cuda.max_memory_allocated(device) / 1024**3  # GB
+            total_memory = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+            gpu_memory_info = {
+                "allocated_gb": round(allocated, 2),
+                "reserved_gb": round(reserved, 2),
+                "max_allocated_gb": round(max_allocated, 2),
+                "total_memory_gb": round(total_memory, 2),
+                "utilization_percent": round((allocated / total_memory) * 100, 1) if total_memory > 0 else 0
+            }
     except ImportError:
         pass
+    except Exception as e:
+        logger.debug(f"Error getting GPU memory info: {e}")
     
     return {
         "status": "ok",
@@ -400,6 +460,7 @@ def health_check():
         "device": DEVICE,
         "cuda_available": cuda_available,
         "gpu_name": gpu_name,
+        "gpu_memory": gpu_memory_info,
         "speaker_files": len(SPEAKER_WAV_LIST),
         "num_reference_clips": NUM_REFERENCE_CLIPS,
     }

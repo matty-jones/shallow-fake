@@ -119,6 +119,7 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
         f.write(f"XTTS_LANGUAGE={teacher.language}\n")
         f.write(f"XTTS_DEVICE={teacher.device}\n")
         f.write(f"XTTS_NUM_REFERENCE_CLIPS={teacher.num_reference_clips}\n")
+        f.write(f"UVICORN_WORKERS={teacher.workers}\n")
         f.write(f"REFERENCE_AUDIO_DIR={reference_dir_abs}\n")
         f.write(f"MODEL_CACHE_DIR={model_cache_dir_abs}\n")
         # XTTS_SPEAKER_WAVS will be set to the directory path, server will find WAVs
@@ -131,33 +132,105 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
         raise FileNotFoundError(f"Docker compose file not found: {compose_file}")
 
     # Start the service
+    # Define compose args that will be reused
+    compose_base_args = [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_file),
+        "--env-file",
+        str(env_file),
+    ]
+    
     try:
-        logger.info("Building and starting teacher model container (this may take a few minutes on first build)...")
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "--env-file",
-                str(env_file),
-                "up",
-                "-d",
-                "--build",
-            ],
+        logger.info("Building and starting teacher model container (using cache if available)...")
+        # Build with cache - Docker will automatically detect changes and rebuild only what's necessary
+        # Multi-stage Dockerfile ensures expensive dependency layers are cached
+        build_args = compose_base_args + ["build"]
+        
+        # Build first
+        logger.info("Building Docker image (will use cache if nothing changed)...")
+        build_result = subprocess.run(
+            build_args,
             check=True,
             capture_output=True,
             text=True,
         )
+        if build_result.stdout and build_result.stdout.strip():
+            logger.debug(f"Build output: {build_result.stdout}")
+        if build_result.stderr and build_result.stderr.strip():
+            logger.debug(f"Build stderr: {build_result.stderr}")
+        logger.info("Docker image built successfully")
+        
+        # Then start the container
+        start_args = compose_base_args + ["up", "-d"]
+        
+        logger.info("Starting container...")
+        start_result = subprocess.run(
+            start_args,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        
         # Log output if available (usually empty for -d mode, but useful for debugging)
-        if result.stdout and result.stdout.strip():
-            logger.debug(f"Docker compose output: {result.stdout}")
-        if result.stderr and result.stderr.strip():
-            logger.debug(f"Docker compose stderr: {result.stderr}")
+        if start_result.stdout and start_result.stdout.strip():
+            logger.debug(f"Docker compose output: {start_result.stdout}")
+        if start_result.stderr and start_result.stderr.strip():
+            logger.debug(f"Docker compose stderr: {start_result.stderr}")
         logger.info("Teacher model container started")
+        
+        # Clean up old/unused images after successful build to free disk space
+        # This removes dangling images and images not associated with any container
+        logger.debug("Cleaning up old Docker images...")
+        try:
+            subprocess.run(
+                ["docker", "image", "prune", "-f"],
+                check=False,  # Don't fail if cleanup fails
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            pass  # Non-critical cleanup
+        
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to start teacher model service: {e.stderr}")
-        raise
+        # Check if error is related to cache corruption (missing parent snapshot)
+        error_msg = e.stderr or ""
+        if "parent snapshot" in error_msg or "does not exist: not found" in error_msg:
+            logger.warning("Docker build cache appears corrupted. Cleaning cache and retrying...")
+            # Clean cache and retry with --no-cache
+            try:
+                subprocess.run(
+                    ["docker", "builder", "prune", "-f"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info("Retrying build with --no-cache after cache cleanup...")
+                # Retry with --no-cache
+                build_args_retry = compose_base_args + ["build", "--no-cache"]
+                subprocess.run(
+                    build_args_retry,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                # Start container after successful retry
+                start_result = subprocess.run(
+                    start_args,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info("Teacher model container started after cache cleanup")
+            except subprocess.CalledProcessError as retry_error:
+                logger.error(f"Failed to start teacher model service even after cache cleanup: {retry_error.stderr}")
+                raise
+        else:
+            logger.error(f"Failed to start teacher model service: {e.stderr}")
+            if e.stdout:
+                logger.error(f"Build output: {e.stdout}")
+            raise
 
     # Wait for service to be ready
     base_url = f"http://localhost:{teacher.port}"
@@ -181,6 +254,13 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
                 
                 if device == "cuda" and cuda_available:
                     logger.info(f"GPU acceleration: ENABLED ({gpu_name})")
+                    # Log GPU memory info if available
+                    gpu_memory = health_data.get("gpu_memory")
+                    if gpu_memory:
+                        allocated = gpu_memory.get("allocated_gb", 0)
+                        total = gpu_memory.get("total_memory_gb", 0)
+                        utilization = gpu_memory.get("utilization_percent", 0)
+                        logger.info(f"GPU memory: {allocated:.2f} GB / {total:.2f} GB ({utilization:.1f}% utilized)")
                 elif device == "cuda" and not cuda_available:
                     logger.warning(f"GPU acceleration: REQUESTED but CUDA not available, using CPU")
                 else:

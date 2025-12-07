@@ -37,7 +37,10 @@ synthetic:
     device: cuda
     reference_audio_dir: datasets/claudia/real_clean/wavs
     num_reference_clips: 0
-  max_parallel_jobs: 4
+    workers: 2  # Reduced from 3 to prevent GPU OOM (2 workers = ~8GB models, leaves ~7GB for inference)
+  # max_parallel_jobs is auto-calculated as workers * 2 (12 in this case)
+  # You can override it by uncommenting the line below:
+  # max_parallel_jobs: 12
 training:
   base_checkpoint: en_GB-base-medium.ckpt
   batch_size: 32

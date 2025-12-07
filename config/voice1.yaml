@@ -29,7 +29,10 @@ synthetic:
   tts_http:
     base_url: http://localhost:9000/tts
     voice_id: voice1_clone
-  max_parallel_jobs: 4
+  # max_parallel_jobs is auto-calculated as teacher.workers * 2 if teacher is configured
+  # If no teacher is configured, defaults to 4
+  # You can override it by uncommenting the line below:
+  # max_parallel_jobs: 4
 training:
   base_checkpoint: en_GB-base-medium.ckpt
   batch_size: 32
