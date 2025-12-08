@@ -37,15 +37,15 @@ synthetic:
     device: cuda
     reference_audio_dir: datasets/claudia/real_clean/wavs
     num_reference_clips: 0
-    workers: 2  # Reduced from 3 to prevent GPU OOM (2 workers = ~8GB models, leaves ~7GB for inference)
-  # max_parallel_jobs is auto-calculated as workers * 2 (12 in this case)
+    workers: 3  # With lock in place, 3 workers = ~10.5GB (3×2GB models + 3×1.5GB inference), fits within 12GB target
+  # max_parallel_jobs is auto-calculated as workers * 2 (6 in this case)
   # You can override it by uncommenting the line below:
   # max_parallel_jobs: 12
 training:
-  base_checkpoint: en_GB-base-medium.ckpt
-  batch_size: 32
-  max_epochs: 1000
-  quality: medium
+  base_checkpoint: cori-high-500-clean.ckpt
+  batch_size: 16
+  max_epochs: 300
+  quality: high
   accelerator: gpu
   devices: 1
 tms:

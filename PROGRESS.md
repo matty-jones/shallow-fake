@@ -72,3 +72,8 @@ All components from the product specification have been implemented:
 - CLI entrypoint: `shallow-fake` (or `python -m shallow_fake.cli`)
 - Docker and NVIDIA Container Toolkit required for training
 - TextyMcSpeechy Docker image and baseline Piper checkpoints needed for training
+- Training compose image name: `textymcspeechy-piper:5080-cu128` (locally built on top of `domesticatedviking/textymcspeechy-piper:latest` with PyTorch nightly cu128; see `docker/Dockerfile.piper5080`).
+- Training container runs from `/app` (compose `working_dir`).
+- Training command now uses `piper_train.preprocess` -> `piper_train` with dataset at `/workspace/datasets/<voice>/combined_prepared` (preprocess input `/workspace/datasets/<voice>/combined`, 22.05 kHz, ljspeech single-speaker, language `en-us`); training arg uses `--max_epochs` (underscore).
+- `launch_training.py` now reads checkpoint `epoch` and sets `MAX_EPOCHS` to `checkpoint_epoch + config.training.max_epochs` so resumed training runs for the requested additional epochs.
+- Training compose sets `shm_size: 8g` to avoid DataLoader shared-memory bus errors.

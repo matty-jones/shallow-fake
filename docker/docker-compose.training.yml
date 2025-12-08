@@ -1,8 +1,10 @@
 services:
   tms-trainer:
-    image: domesticatedviking/textymcspeechy:piper-latest
+    image: textymcspeechy-piper:5080-cu128
     container_name: tms-${PROJECT_NAME}-trainer
-    restart: unless-stopped
+    restart: "no"
+    working_dir: /app
+    shm_size: 8g
     
     # GPU passthrough configuration using CDI
     devices:
@@ -14,28 +16,239 @@ services:
       - TMS_LOGS=/workspace/logs
       - TMS_AUDIO_SAMPLES=/workspace/audio_samples
       - CUDA_VISIBLE_DEVICES=0
+      # PyTorch memory optimization to reduce fragmentation
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       # CDI GPU passthrough environment variables
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Training configuration (set by launch_training.py)
+      - PROJECT_NAME=${PROJECT_NAME}
+      - BASE_CHECKPOINT=${BASE_CHECKPOINT}
+      - BATCH_SIZE=${BATCH_SIZE}
+      - MAX_EPOCHS=${MAX_EPOCHS}
+      - QUALITY=${QUALITY}
+      - ACCELERATOR=${ACCELERATOR}
+      - DEVICES=${DEVICES}
     volumes:
       - ../tms_workspace:/workspace
     ports:
       - "6006:6006"   # TensorBoard
       - "8765:8765"   # TMS web UI (if present)
-    command: >
-      sh -c "
+    command:
+      - /bin/bash
+      - -c
+      - |
         echo 'Waiting for dataset to be ready...' &&
         while [ ! -f /workspace/datasets/${PROJECT_NAME}/combined/metadata.csv ]; do
           sleep 5
         done &&
-        echo 'Starting training...' &&
-        python3 tts_dojo/train_piper.py
-          --dataset ${PROJECT_NAME}/combined
-          --base-checkpoint /workspace/checkpoints/base_checkpoints/${BASE_CHECKPOINT}
-          --batch-size ${BATCH_SIZE}
-          --max-epochs ${MAX_EPOCHS}
-          --quality ${QUALITY}
-          --accelerator ${ACCELERATOR}
-          --devices ${DEVICES}
-      "
+        echo 'Preprocessing dataset for Piper...' &&
+        python3 -m piper_train.preprocess --input-dir /workspace/datasets/${PROJECT_NAME}/combined --output-dir /workspace/datasets/${PROJECT_NAME}/combined_prepared --language en-us --sample-rate 22050 --dataset-format ljspeech --single-speaker &&
+        echo 'Starting training (weights-only, no Lightning resume)...' &&
+        python3 << 'PYEOF'
+        import argparse, json, pathlib, torch, os
+        from pytorch_lightning import Trainer
+        from pytorch_lightning.callbacks import ModelCheckpoint
+        from piper_train.vits.lightning import VitsModel
 
+        project_name = os.environ.get('PROJECT_NAME', '')
+        base_checkpoint = os.environ.get('BASE_CHECKPOINT', '')
+        quality = os.environ.get('QUALITY', 'high')
+        batch_size = int(os.environ.get('BATCH_SIZE', '32'))
+        max_epochs = int(os.environ.get('MAX_EPOCHS', '300'))
+        accelerator = os.environ.get('ACCELERATOR', 'gpu')
+        devices = int(os.environ.get('DEVICES', '1'))
+
+        dataset_dir = pathlib.Path(f'/workspace/datasets/{project_name}/combined_prepared')
+        ckpt_path = pathlib.Path(f'/workspace/checkpoints/base_checkpoints/{base_checkpoint}')
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--dataset-dir', required=False)
+        parser.add_argument('--checkpoint-epochs', type=int, default=None)
+        parser.add_argument('--quality', default=quality)
+        Trainer.add_argparse_args(parser)
+        VitsModel.add_model_specific_args(parser)
+        # Parse with required args to satisfy argparse validation
+        args = parser.parse_args(['--dataset-dir', str(dataset_dir), '--batch-size', str(batch_size)])
+
+        args.dataset_dir = dataset_dir
+        args.seed = 1234
+        args.quality = quality
+        args.batch_size = batch_size
+        args.max_epochs = max_epochs
+        args.accelerator = accelerator
+        args.devices = devices
+        # Note: default_root_dir is set in Trainer, not args
+        args.enable_checkpointing = True
+
+        torch.manual_seed(args.seed)
+
+        config = json.load(open(dataset_dir / 'config.json', 'r', encoding='utf-8'))
+        num_symbols = int(config['num_symbols'])
+        num_speakers = int(config['num_speakers'])
+        sample_rate = int(config['audio']['sample_rate'])
+        dataset_path = dataset_dir / 'dataset.jsonl'
+
+        dict_args = vars(args).copy()
+        if args.quality == 'x-low':
+            dict_args.update({
+                'hidden_channels': 96,
+                'inter_channels': 96,
+                'filter_channels': 384,
+            })
+        elif args.quality == 'high':
+            dict_args.update({
+                'resblock': '1',
+                'resblock_kernel_sizes': (3, 7, 11),
+                'resblock_dilation_sizes': (
+                    (1, 3, 5),
+                    (1, 3, 5),
+                    (1, 3, 5),
+                ),
+                'upsample_rates': (8, 8, 2, 2),
+                'upsample_initial_channel': 512,
+                'upsample_kernel_sizes': (16, 16, 4, 4),
+            })
+
+        model = VitsModel(
+            num_symbols=num_symbols,
+            num_speakers=num_speakers,
+            sample_rate=sample_rate,
+            dataset=[dataset_path],
+            **dict_args,
+        )
+
+        if ckpt_path.exists():
+            try:
+                state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            except TypeError:
+                state = torch.load(ckpt_path, map_location='cpu')
+            if isinstance(state, dict) and 'state_dict' in state:
+                state = state['state_dict']
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            print(f'Loaded weights from {ckpt_path}, missing={len(missing)}, unexpected={len(unexpected)}')
+        else:
+            print(f'Checkpoint not found: {ckpt_path}')
+
+        # Remove ExponentialLR scheduler from configure_optimizers to avoid PyTorch Lightning validation errors
+        original_configure_optimizers = model.configure_optimizers
+        def patched_configure_optimizers():
+            result = original_configure_optimizers()
+            
+            def is_exponential_lr(obj):
+                if obj is None:
+                    return False
+                obj_str = str(type(obj))
+                return 'ExponentialLR' in obj_str
+            
+            # Handle tuple return type (common: (optimizer, scheduler))
+            if isinstance(result, tuple) and len(result) == 2:
+                opt, sched = result
+                if is_exponential_lr(sched):
+                    return opt
+                return opt  # Return just optimizer to avoid scheduler issues
+            
+            # Handle list of tuples
+            if isinstance(result, list):
+                cleaned = []
+                for item in result:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        opt, sched = item
+                        if not is_exponential_lr(sched):
+                            cleaned.append(item)
+                        else:
+                            cleaned.append(opt)
+                    elif isinstance(item, dict):
+                        if 'lr_scheduler' in item and is_exponential_lr(item['lr_scheduler']):
+                            new_item = {k: v for k, v in item.items() if k != 'lr_scheduler'}
+                            if 'optimizer' in new_item:
+                                cleaned.append(new_item['optimizer'])
+                            elif new_item:
+                                cleaned.append(new_item)
+                        else:
+                            cleaned.append(item)
+                    else:
+                        if not is_exponential_lr(item):
+                            cleaned.append(item)
+                return cleaned if cleaned else result
+            
+            # Handle dict
+            if isinstance(result, dict):
+                if 'lr_scheduler' in result and is_exponential_lr(result['lr_scheduler']):
+                    return result.get('optimizer', result)
+            
+            return result
+        model.configure_optimizers = patched_configure_optimizers
+
+        # Configure checkpoint callback to save model weights
+        # Use default_root_dir so checkpoints are saved in lightning_logs/version_X/checkpoints/
+        # This matches what export_onnx.py expects
+        # Save only 2 checkpoints total: one at midpoint, one at end (to avoid filling storage)
+        checkpoint_callback = ModelCheckpoint(
+            filename='epoch={epoch:03d}-step={step:06d}',
+            every_n_epochs=max(1, max_epochs // 2),  # Save at midpoint (e.g., epoch 150 for 300 total)
+            save_top_k=0,  # Don't keep top-k checkpoints (we'll use every_n_epochs + save_last)
+            save_last=True,  # Always save last checkpoint (gives us 2 total: midpoint + final)
+            save_on_train_epoch_end=True,  # Save after training epoch completes
+        )
+
+        trainer = Trainer(
+            max_epochs=args.max_epochs,
+            accelerator=args.accelerator,
+            devices=args.devices,
+            log_every_n_steps=50,
+            enable_checkpointing=True,
+            callbacks=[checkpoint_callback],
+            num_sanity_val_steps=0,
+            default_root_dir=str(dataset_dir),  # This ensures lightning_logs structure
+        )
+        
+        # Run training with error handling
+        try:
+            trainer.fit(model)
+            
+            # Verify checkpoints were saved - CRITICAL for ensuring model is preserved
+            checkpoint_dir = dataset_dir / 'lightning_logs'
+            checkpoints_found = False
+            if checkpoint_dir.exists():
+                version_dirs = [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith('version_')]
+                if version_dirs:
+                    latest_version = max(version_dirs, key=lambda d: int(d.name.split('_')[1]) if d.name.split('_')[1].isdigit() else 0)
+                    checkpoints_dir = latest_version / 'checkpoints'
+                    if checkpoints_dir.exists():
+                        checkpoints = list(checkpoints_dir.glob('*.ckpt'))
+                        if checkpoints:
+                            checkpoints_found = True
+                            print(f'SUCCESS: Training completed. Saved {len(checkpoints)} checkpoint(s) to {checkpoints_dir}')
+                            # Show last checkpoint (should be the final model)
+                            last_ckpt = [c for c in checkpoints if 'last' in c.name.lower()]
+                            if last_ckpt:
+                                print(f'Final checkpoint: {last_ckpt[0].name}')
+                            # Show highest epoch checkpoint
+                            def get_epoch(ckpt_path):
+                                import re
+                                match = re.search(r'epoch[=](\d+)', ckpt_path.name)
+                                return int(match.group(1)) if match else 0
+                            highest_epoch = max(checkpoints, key=get_epoch)
+                            print(f'Highest epoch checkpoint: {highest_epoch.name} (epoch {get_epoch(highest_epoch)})')
+                        else:
+                            print(f'ERROR: Training completed but NO CHECKPOINTS FOUND in {checkpoints_dir}')
+                            print(f'This is a critical error - model weights were not saved!')
+                    else:
+                        print(f'ERROR: Checkpoints directory not found: {checkpoints_dir}')
+                else:
+                    print(f'ERROR: No version directories found in {checkpoint_dir}')
+            else:
+                print(f'ERROR: Lightning logs directory not found: {checkpoint_dir}')
+            
+            if not checkpoints_found:
+                print(f'CRITICAL ERROR: No checkpoints were saved during training!')
+                print(f'This means the trained model weights are LOST.')
+                print(f'Please check PyTorch Lightning configuration and checkpoint callback setup.')
+                raise RuntimeError('Training completed but no checkpoints were saved')
+        except Exception as e:
+            print(f'ERROR: Training failed: {e}')
+            import traceback
+            traceback.print_exc()
+            raise
+        PYEOF

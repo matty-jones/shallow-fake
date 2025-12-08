@@ -1,0 +1,16 @@
+# Rebuild TextyMcSpeechy Piper trainer with a CUDA 12.4 nightly PyTorch
+FROM domesticatedviking/textymcspeechy-piper:latest
+
+# Ensure pip is present and updated
+RUN python -m pip install --upgrade pip
+
+# Remove existing PyTorch stack (ignore failures if already absent)
+RUN python -m pip uninstall -y torch torchvision torchaudio || true
+
+# Install nightly PyTorch with CUDA 12.8 support (latest available)
+RUN python -m pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/nightly/cu128 \
+    torch torchvision
+
+# torchaudio not required for Piper training; skip to avoid missing wheels on cu124
+

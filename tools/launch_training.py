@@ -3,6 +3,9 @@
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
+
+import torch
 
 from shallow_fake.config import VoiceConfig
 from shallow_fake.utils import ensure_dir, setup_logging
@@ -67,13 +70,24 @@ def launch_training(config: VoiceConfig):
     # Prepare workspace
     prepare_tms_workspace(config)
 
+    # Determine effective max epochs: just use the configured value
+    # Since we're doing weights-only loading (not Lightning resume),
+    # PyTorch Lightning will start from epoch 0, but the weights are already loaded
+    max_epochs = config.training.max_epochs
+    checkpoint_path = config.paths.tms_workspace_dir / "checkpoints" / "base_checkpoints" / config.training.base_checkpoint
+    if checkpoint_path.exists():
+        logger.info(f"Base checkpoint found: {checkpoint_path}")
+        logger.info(f"Training for {max_epochs} epochs with pre-loaded weights")
+    else:
+        logger.warning(f"Checkpoint not found at {checkpoint_path}; training from scratch.")
+
     # Set environment variables for docker-compose
     env = os.environ.copy()
     env.update({
         "PROJECT_NAME": config.voice_id,  # Use voice_id as project name
         "BASE_CHECKPOINT": config.training.base_checkpoint,
         "BATCH_SIZE": str(config.training.batch_size),
-        "MAX_EPOCHS": str(config.training.max_epochs),
+        "MAX_EPOCHS": str(max_epochs),
         "QUALITY": config.training.quality,
         "ACCELERATOR": config.training.accelerator,
         "DEVICES": str(config.training.devices),

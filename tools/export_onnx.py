@@ -15,41 +15,55 @@ logger = setup_logging()
 
 def find_best_checkpoint(checkpoints_dir: Path) -> Optional[Path]:
     """Find the best checkpoint (latest epoch or lowest val loss)."""
-    # Look for checkpoints in lightning_logs structure
+    # Check multiple possible locations for checkpoints
+    
+    # Location 1: lightning_logs structure in datasets (where training actually saves)
+    # Pattern: tms_workspace/datasets/{voice}/combined_prepared/lightning_logs/version_X/checkpoints/
+    datasets_dir = checkpoints_dir.parent.parent / "datasets"
+    if datasets_dir.exists():
+        for voice_dir in datasets_dir.iterdir():
+            if voice_dir.is_dir():
+                prepared_dir = voice_dir / "combined_prepared"
+                if prepared_dir.exists():
+                    lightning_logs = prepared_dir / "lightning_logs"
+                    if lightning_logs.exists():
+                        version_dirs = [d for d in lightning_logs.iterdir() if d.is_dir() and d.name.startswith("version_")]
+                        if version_dirs:
+                            latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
+                            version_checkpoints_dir = latest_version / "checkpoints"
+                            if version_checkpoints_dir.exists():
+                                checkpoints = list(version_checkpoints_dir.glob("*.ckpt"))
+                                if checkpoints:
+                                    def get_epoch(ckpt_path: Path) -> int:
+                                        match = re.search(r"epoch[=](\d+)", ckpt_path.name)
+                                        return int(match.group(1)) if match else 0
+                                    best_checkpoint = max(checkpoints, key=get_epoch)
+                                    logger.info(f"Found best checkpoint: {best_checkpoint}")
+                                    return best_checkpoint
+    
+    # Location 2: lightning_logs structure in logs directory (legacy)
     lightning_logs = checkpoints_dir.parent / "logs" / "lightning_logs"
-    if not lightning_logs.exists():
-        # Try direct checkpoints directory
-        checkpoints = list(checkpoints_dir.glob("*.ckpt"))
-        if checkpoints:
-            # Return most recently modified
-            return max(checkpoints, key=lambda p: p.stat().st_mtime)
-        return None
-
-    # Find all version directories
-    version_dirs = [d for d in lightning_logs.iterdir() if d.is_dir() and d.name.startswith("version_")]
-    if not version_dirs:
-        return None
-
-    # Get latest version
-    latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
-
-    # Find checkpoints in this version
-    version_checkpoints_dir = latest_version / "checkpoints"
-    if not version_checkpoints_dir.exists():
-        return None
-
-    checkpoints = list(version_checkpoints_dir.glob("*.ckpt"))
-    if not checkpoints:
-        return None
-
-    # Return checkpoint with highest epoch number
-    def get_epoch(ckpt_path: Path) -> int:
-        match = re.search(r"epoch[=](\d+)", ckpt_path.name)
-        return int(match.group(1)) if match else 0
-
-    best_checkpoint = max(checkpoints, key=get_epoch)
-    logger.info(f"Found best checkpoint: {best_checkpoint}")
-    return best_checkpoint
+    if lightning_logs.exists():
+        version_dirs = [d for d in lightning_logs.iterdir() if d.is_dir() and d.name.startswith("version_")]
+        if version_dirs:
+            latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
+            version_checkpoints_dir = latest_version / "checkpoints"
+            if version_checkpoints_dir.exists():
+                checkpoints = list(version_checkpoints_dir.glob("*.ckpt"))
+                if checkpoints:
+                    def get_epoch(ckpt_path: Path) -> int:
+                        match = re.search(r"epoch[=](\d+)", ckpt_path.name)
+                        return int(match.group(1)) if match else 0
+                    best_checkpoint = max(checkpoints, key=get_epoch)
+                    logger.info(f"Found best checkpoint: {best_checkpoint}")
+                    return best_checkpoint
+    
+    # Location 3: Direct checkpoints directory
+    checkpoints = list(checkpoints_dir.glob("*.ckpt"))
+    if checkpoints:
+        return max(checkpoints, key=lambda p: p.stat().st_mtime)
+    
+    return None
 
 
 def export_onnx_from_container(

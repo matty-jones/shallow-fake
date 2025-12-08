@@ -153,34 +153,30 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     )
     
     # Stage 7: Train
-    checkpoints_dir = config.paths.tms_workspace_dir / "checkpoints"
-    has_checkpoints = False
+    # Check for training output checkpoints (not base checkpoints)
+    # Training checkpoints are saved to: tms_workspace/datasets/{voice_id}/combined_prepared/lightning_logs/version_X/checkpoints/
+    training_checkpoints_dir = config.paths.tms_workspace_dir / "datasets" / config.voice_id / "combined_prepared" / "lightning_logs"
+    has_training_checkpoints = False
+    checkpoint_count = 0
     checkpoint_info = "Training not started"
     
-    if checkpoints_dir.exists():
-        # Look for lightning_logs structure
-        logs_dir = config.paths.tms_workspace_dir / "logs" / "lightning_logs"
-        if logs_dir.exists():
-            version_dirs = [d for d in logs_dir.iterdir() if d.is_dir() and d.name.startswith("version_")]
-            if version_dirs:
-                latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
-                version_checkpoints = latest_version / "checkpoints"
-                if version_checkpoints.exists():
-                    checkpoints = list(version_checkpoints.glob("*.ckpt"))
-                    if checkpoints:
-                        has_checkpoints = True
-                        checkpoint_info = f"Training in progress ({len(checkpoints)} checkpoints found)"
-        
-        # Also check direct checkpoints
-        if not has_checkpoints:
-            direct_checkpoints = list(checkpoints_dir.glob("**/*.ckpt"))
-            if direct_checkpoints:
-                has_checkpoints = True
-                checkpoint_info = f"Training in progress ({len(direct_checkpoints)} checkpoints found)"
+    # Look for training output checkpoints in the correct location
+    if training_checkpoints_dir.exists():
+        version_dirs = [d for d in training_checkpoints_dir.iterdir() if d.is_dir() and d.name.startswith("version_")]
+        if version_dirs:
+            latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
+            version_checkpoints = latest_version / "checkpoints"
+            if version_checkpoints.exists():
+                checkpoints = list(version_checkpoints.glob("*.ckpt"))
+                if checkpoints:
+                    has_training_checkpoints = True
+                    checkpoint_count = len(checkpoints)
+                    checkpoint_info = f"Training completed ({checkpoint_count} checkpoint(s) found)"
     
     # Check if container is running
     import subprocess
     container_name = f"tms-{config.voice_id}-trainer"
+    container_running = False
     try:
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
@@ -188,12 +184,20 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
             text=True,
             timeout=2,
         )
-        if container_name in result.stdout:
-            status["train"] = (True, "Training container running")
-        else:
-            status["train"] = (has_checkpoints, checkpoint_info)
+        container_running = container_name in result.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        status["train"] = (has_checkpoints, checkpoint_info)
+        container_running = False
+    
+    # Determine training status:
+    # - If container is running: "In Progress" (not complete)
+    # - If container not running but checkpoints exist: "Complete"
+    # - If container not running and no checkpoints: "Not Started" or "Pending"
+    if container_running:
+        status["train"] = (False, "Training in progress (container running)")
+    elif has_training_checkpoints:
+        status["train"] = (True, checkpoint_info)
+    else:
+        status["train"] = (False, checkpoint_info)
     
     # Stage 8: Export
     models_dir = config.paths.output_models_dir
@@ -266,7 +270,15 @@ def show_status(config: VoiceConfig, project_name: str = None):
     for stage_key, stage_name, command in stages:
         completed, details = status[stage_key]
         status_icon = "✓" if completed else "○"
-        status_text = "[green]Complete[/green]" if completed else "[yellow]Pending[/yellow]"
+        
+        # Special handling for "in progress" status
+        if "in progress" in details.lower() or "container running" in details.lower():
+            status_text = "[bold cyan]In Progress[/bold cyan]"
+            status_icon = "⟳"
+        elif completed:
+            status_text = "[green]Complete[/green]"
+        else:
+            status_text = "[yellow]Pending[/yellow]"
         
         # Highlight next step
         if stage_key == next_step and not completed:
