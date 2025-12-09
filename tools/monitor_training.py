@@ -115,7 +115,7 @@ def tail_docker_logs(container_name: str, follow: bool = True):
     status_text = "Waiting for training to start..."
     error_log: Deque[str] = deque(maxlen=10)  # Keep last 10 errors/warnings
     last_metrics = {}
-    
+
     try:
         process = subprocess.Popen(
             cmd,
@@ -130,7 +130,7 @@ def tail_docker_logs(container_name: str, follow: bool = True):
             refresh_per_second=4,
             screen=True,  # Clear screen for clean overwriting of progress lines
         ) as live:
-            for line in process.stdout:
+        for line in process.stdout:
                 line = line.rstrip('\n\r')
                 
                 # Skip empty lines
@@ -180,7 +180,7 @@ def tail_docker_logs(container_name: str, follow: bool = True):
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopping log monitoring...[/yellow]")
         if 'process' in locals():
-            process.terminate()
+        process.terminate()
     except FileNotFoundError:
         console.print("[red]Error: docker command not found[/red]")
     except Exception as e:

@@ -12,5 +12,8 @@ RUN python -m pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/nightly/cu128 \
     torch torchvision
 
+# Install onnxscript for ONNX export functionality (required for PyTorch 2.x ONNX export)
+RUN python -m pip install --no-cache-dir onnxscript
+
 # torchaudio not required for Piper training; skip to avoid missing wheels on cu124
 
