@@ -80,10 +80,42 @@ def export_onnx_from_container(
     """Export ONNX model using piper_train.export_onnx in a temporary container."""
     # Use docker run since training container is torn down after completion
     # checkpoint_path and output_path are relative to /workspace inside container
-    # GPU passthrough configuration matches docker-compose.training.yml (CDI format)
     
-    image = "textymcspeechy-piper:5080-cu128"
+    # Use stable CPU export image to avoid torch.export nightly dynamic-shape issues
+    image = "textymcspeechy-piper:export-cpu"
     workspace_abs = tms_workspace_dir.resolve()
+    
+    # Check if image exists, build if it doesn't
+    logger.info(f"Checking for export image: {image}")
+    check_result = subprocess.run(
+        ["docker", "images", "-q", image],
+        capture_output=True,
+        text=True,
+    )
+    if not check_result.stdout.strip():
+        logger.info(f"Export image not found. Building {image}...")
+        dockerfile_path = Path(__file__).parent.parent / "docker" / "Dockerfile.piper_export_cpu"
+        if not dockerfile_path.exists():
+            raise FileNotFoundError(
+                f"Dockerfile not found: {dockerfile_path}. "
+                "Cannot build export image automatically."
+            )
+        build_cmd = [
+            "docker",
+            "build",
+            "-f", str(dockerfile_path),
+            "-t", image,
+            str(dockerfile_path.parent.parent),  # Build context (project root)
+        ]
+        build_result = subprocess.run(
+            build_cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.info("Export image built successfully")
+    else:
+        logger.info(f"Export image found: {image}")
     
     # Create a wrapper script that patches torch.load and handles export issues
     # This handles PyTorch 2.6+ weights_only=True default issue with pathlib.PosixPath
@@ -129,19 +161,13 @@ sys.argv = ['export_onnx', '/workspace/{checkpoint_path}', '/workspace/{output_p
 main()
 """
     
-    # Build docker run command with CDI GPU passthrough (matches training container)
+    # Build docker run command (CPU export; no GPU needed)
     cmd = [
         "docker",
         "run",
         "--rm",  # Automatically remove container after it exits
-        "--device", "nvidia.com/gpu=all",  # CDI GPU passthrough (matches docker-compose.training.yml)
         "-v", f"{workspace_abs}:/workspace",  # Mount workspace
         "-w", "/app",  # Working directory
-        # Environment variables matching docker-compose.training.yml
-        "-e", "CUDA_VISIBLE_DEVICES=0",
-        "-e", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
-        "-e", "NVIDIA_VISIBLE_DEVICES=all",
-        "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
         image,
         "python3",
         "-c",
@@ -168,13 +194,19 @@ main()
         raise
 
 
-def find_config_json(checkpoint_dir: Path) -> Optional[Path]:
-    """Find config.json associated with checkpoint."""
-    # Look for config.json in various locations
+def find_config_json(checkpoint_path: Path, voice_id: str, tms_workspace_dir: Path) -> Optional[Path]:
+    """Find config.json associated with the model."""
+    # The config.json is created during preprocessing in the combined_prepared directory
+    # This is the primary location where it should be found
+    primary_location = tms_workspace_dir / "datasets" / voice_id / "combined_prepared" / "config.json"
+    if primary_location.exists():
+        return primary_location
+    
+    # Fallback: Look for config.json in various locations relative to checkpoint
     possible_locations = [
-        checkpoint_dir / "config.json",
-        checkpoint_dir.parent / "config.json",
-        checkpoint_dir.parent.parent / "config.json",
+        checkpoint_path.parent / "config.json",
+        checkpoint_path.parent.parent / "config.json",
+        checkpoint_path.parent.parent.parent / "config.json",
     ]
 
     for loc in possible_locations:
@@ -225,25 +257,18 @@ def export_onnx(config: VoiceConfig, checkpoint_path: Optional[Path] = None):
     else:
         logger.warning(f"ONNX file not found in expected location: {container_onnx}")
 
-    # Find and copy config.json
-    config_json = find_config_json(checkpoint_path.parent)
+    # Find and copy config.json from the preprocessing directory
+    config_json = find_config_json(checkpoint_path, config.voice_id, config.paths.tms_workspace_dir)
     if config_json and config_json.exists():
         shutil.copy2(config_json, json_path)
         logger.info(f"Config JSON saved: {json_path}")
     else:
-        logger.warning("config.json not found. You may need to create it manually.")
-        # Create a minimal config.json
-        minimal_config = {
-            "audio": {
-                "sample_rate": 22050,
-            },
-            "espeak": {
-                "voice": config.phoneme_check.language,
-            },
-        }
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(minimal_config, f, indent=2)
-        logger.info(f"Created minimal config JSON: {json_path}")
+        logger.error(f"config.json not found. Expected location: {config.paths.tms_workspace_dir / 'datasets' / config.voice_id / 'combined_prepared' / 'config.json'}")
+        logger.error("The config.json should have been created during preprocessing. Please ensure training has completed successfully.")
+        raise FileNotFoundError(
+            f"config.json not found. This file is required for model evaluation. "
+            f"It should be at: {config.paths.tms_workspace_dir / 'datasets' / config.voice_id / 'combined_prepared' / 'config.json'}"
+        )
 
     logger.info(f"Export complete: {onnx_path} and {json_path}")
 

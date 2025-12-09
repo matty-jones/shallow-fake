@@ -1,0 +1,21 @@
+# Export-only image using a stable CPU PyTorch to avoid nightly torch.export issues
+FROM domesticatedviking/textymcspeechy-piper:latest
+
+# Ensure pip is present and updated
+RUN python -m pip install --upgrade pip
+
+# Remove any existing PyTorch stack
+RUN python -m pip uninstall -y torch torchvision torchaudio || true
+
+# Install stable CPU PyTorch (no CUDA needed for export)
+RUN python -m pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.2.2+cpu \
+    torchvision==0.17.2+cpu \
+    torchaudio==2.2.2+cpu
+
+# Install ONNX tooling
+RUN python -m pip install --no-cache-dir onnx onnxscript
+
+# Note: torchaudio is not required for export but installed for compatibility
+

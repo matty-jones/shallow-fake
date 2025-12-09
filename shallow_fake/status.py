@@ -163,12 +163,12 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     # Look for training output checkpoints in the correct location
     if training_checkpoints_dir.exists():
         version_dirs = [d for d in training_checkpoints_dir.iterdir() if d.is_dir() and d.name.startswith("version_")]
-            if version_dirs:
-                latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
-                version_checkpoints = latest_version / "checkpoints"
-                if version_checkpoints.exists():
-                    checkpoints = list(version_checkpoints.glob("*.ckpt"))
-                    if checkpoints:
+        if version_dirs:
+            latest_version = max(version_dirs, key=lambda d: int(d.name.split("_")[1]) if d.name.split("_")[1].isdigit() else 0)
+            version_checkpoints = latest_version / "checkpoints"
+            if version_checkpoints.exists():
+                checkpoints = list(version_checkpoints.glob("*.ckpt"))
+                if checkpoints:
                     has_training_checkpoints = True
                     checkpoint_count = len(checkpoints)
                     checkpoint_info = f"Training completed ({checkpoint_count} checkpoint(s) found)"
