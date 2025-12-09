@@ -14,6 +14,7 @@ from faster_whisper import WhisperModel
 from piper_phonemize import phonemize_espeak
 
 from shallow_fake.config import VoiceConfig
+from shallow_fake.language_utils import convert_language_for_phoneme
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
@@ -186,9 +187,10 @@ def verify_synthetic_entry(
     if not whisper_text:
         return False, 1.0
 
-    # Phonemize both
-    canonical_phonemes = phonemize_text(text, config.phoneme_check.language)
-    whisper_phonemes = phonemize_text(whisper_text, config.phoneme_check.language)
+    # Phonemize both (convert language format for phoneme checking)
+    phoneme_language = convert_language_for_phoneme(config.language)
+    canonical_phonemes = phonemize_text(text, phoneme_language)
+    whisper_phonemes = phonemize_text(whisper_text, phoneme_language)
 
     if not canonical_phonemes or not whisper_phonemes:
         return False, 1.0

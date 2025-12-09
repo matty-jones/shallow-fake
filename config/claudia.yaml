@@ -1,15 +1,11 @@
 voice_id: claudia
 language: en_GB
 paths:
-  raw_audio_dir: data_raw/claudia/input_audio
-  normalized_dir: data_processed/claudia/normalized
-  segments_dir: data_processed/claudia/segments
-  asr_metadata: data_processed/claudia/asr_segments.jsonl
-  real_dataset_dir: datasets/claudia/real
-  synth_dataset_dir: datasets/claudia/synth
-  combined_dataset_dir: datasets/claudia/combined
-  tms_workspace_dir: tms_workspace
-  output_models_dir: models/claudia
+  input_audio_dir: input/claudia/audio
+  workspace_dir: workspace/claudia
+  models_dir: models/claudia
+  shared_models_dir: models/shared
+  corpus_path: input/shared/corpus.txt
 asr:
   model_size: medium.en
   device: cuda
@@ -18,12 +14,11 @@ asr:
   min_segment_seconds: 1.0
   min_confidence: 0.7
 phoneme_check:
-  language: en-gb
   max_phoneme_distance: 0.1
   use_tts_roundtrip: true
 synthetic:
   enabled: true
-  corpus_text_path: data_raw/external_corpus/corpus.txt
+  corpus_text_path: input/shared/corpus.txt
   max_sentences: 3020
   tts_backend: http
   tts_http:
@@ -35,7 +30,7 @@ synthetic:
     model_name: tts_models/multilingual/multi-dataset/xtts_v2
     language: en
     device: cuda
-    reference_audio_dir: datasets/claudia/real_clean/wavs
+    reference_audio_dir: workspace/claudia/datasets/real/wavs
     num_reference_clips: 0
     workers: 3  # With lock in place, 3 workers = ~10.5GB (3×2GB models + 3×1.5GB inference), fits within 12GB target
   # max_parallel_jobs is auto-calculated as workers * 2 (6 in this case)

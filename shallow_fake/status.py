@@ -35,10 +35,10 @@ def discover_projects(base_dir: Path = None) -> List[Tuple[str, Path]]:
                 logger.debug(f"Failed to load config {config_file}: {e}")
                 continue
     
-    # Method 2: Find projects from datasets directory structure
-    datasets_dir = base_dir / "datasets"
-    if datasets_dir.exists():
-        for project_dir in datasets_dir.iterdir():
+    # Method 2: Find projects from workspace directory structure (new structure)
+    workspace_dir = base_dir / "workspace"
+    if workspace_dir.exists():
+        for project_dir in workspace_dir.iterdir():
             if project_dir.is_dir():
                 project_name = project_dir.name
                 # Check if we already found this project via config
@@ -54,6 +54,25 @@ def discover_projects(base_dir: Path = None) -> List[Tuple[str, Path]]:
                             projects.append((project_name, config_file))
                     else:
                         # Project exists but no config - still report it
+                        projects.append((project_name, None))
+    
+    # Method 3: Fallback - Find projects from old datasets directory structure (for migration)
+    datasets_dir = base_dir / "datasets"
+    if datasets_dir.exists():
+        for project_dir in datasets_dir.iterdir():
+            if project_dir.is_dir():
+                project_name = project_dir.name
+                # Check if we already found this project
+                if not any(name == project_name for name, _ in projects):
+                    # Look for a matching config file
+                    config_file = config_dir / f"{project_name}.yaml"
+                    if config_file.exists():
+                        try:
+                            config = VoiceConfig.from_yaml(config_file)
+                            projects.append((config.voice_id, config_file))
+                        except Exception:
+                            projects.append((project_name, config_file))
+                    else:
                         projects.append((project_name, None))
     
     # Remove duplicates (keep first occurrence)
@@ -76,10 +95,10 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     status = {}
     
     # Stage 1: Initialization
-    config_exists = config.paths.real_dataset_dir.exists()
+    workspace_exists = config.paths.workspace_dir.exists()
     status["init"] = (
-        config_exists,
-        "Project initialized" if config_exists else "Project not initialized"
+        workspace_exists,
+        "Project initialized" if workspace_exists else "Project not initialized"
     )
     
     # Stage 2: ASR Segmentation
@@ -104,42 +123,28 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
         else "Real dataset not built"
     )
     
-    # Stage 4: Verify
-    real_clean_dir = config.paths.real_dataset_dir.parent / f"{config.paths.real_dataset_dir.name}_clean"
-    clean_metadata = real_clean_dir / "metadata.csv"
-    clean_wavs = real_clean_dir / "wavs"
-    has_clean = clean_metadata.exists() and clean_wavs.exists()
-    clean_count = len(list(clean_wavs.glob("*.wav"))) if clean_wavs.exists() else 0
+    # Stage 4: Verify (now in-place, check if real dataset has been verified)
+    real_metadata = config.paths.real_dataset_dir / "metadata.csv"
+    real_wavs = config.paths.real_dataset_dir / "wavs"
+    has_real = real_metadata.exists() and real_wavs.exists()
+    real_count = len(list(real_wavs.glob("*.wav"))) if real_wavs.exists() else 0
+    # Verification is now in-place, so if real dataset exists, it's been verified
     status["verify"] = (
-        has_clean and clean_count > 0,
-        f"Phoneme verification complete ({clean_count} valid entries)" if has_clean and clean_count > 0
+        has_real and real_count > 0,
+        f"Phoneme verification complete ({real_count} valid entries)" if has_real and real_count > 0
         else "Phoneme verification not run"
     )
     
-    # Stage 5: Build Synthetic
+    # Stage 5: Build Synthetic (verification is now in-place)
     synth_metadata = config.paths.synth_dataset_dir / "metadata.csv"
     synth_wavs = config.paths.synth_dataset_dir / "wavs"
-    synth_clean_dir = config.paths.synth_dataset_dir.parent / f"{config.paths.synth_dataset_dir.name}_clean"
-    synth_clean_metadata = synth_clean_dir / "metadata.csv"
-    
-    has_synth = synth_metadata.exists() or synth_clean_metadata.exists()
-    if synth_clean_metadata.exists():
-        synth_count = len(list((synth_clean_dir / "wavs").glob("*.wav"))) if (synth_clean_dir / "wavs").exists() else 0
-        status["build-synth"] = (
-            True,
-            f"Synthetic dataset built and verified ({synth_count} entries)"
-        )
-    elif synth_metadata.exists():
-        synth_count = len(list(synth_wavs.glob("*.wav"))) if synth_wavs.exists() else 0
-        status["build-synth"] = (
-            True,
-            f"Synthetic dataset built ({synth_count} entries, not verified)"
-        )
-    else:
-        status["build-synth"] = (
-            False,
-            "Synthetic dataset not built"
-        )
+    has_synth = synth_metadata.exists() and synth_wavs.exists()
+    synth_count = len(list(synth_wavs.glob("*.wav"))) if synth_wavs.exists() else 0
+    status["build-synth"] = (
+        has_synth and synth_count > 0,
+        f"Synthetic dataset built ({synth_count} entries)" if has_synth and synth_count > 0
+        else "Synthetic dataset not built"
+    )
     
     # Stage 6: Combine
     combined_metadata = config.paths.combined_dataset_dir / "metadata.csv"
@@ -154,8 +159,8 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     
     # Stage 7: Train
     # Check for training output checkpoints (not base checkpoints)
-    # Training checkpoints are saved to: tms_workspace/datasets/{voice_id}/combined_prepared/lightning_logs/version_X/checkpoints/
-    training_checkpoints_dir = config.paths.tms_workspace_dir / "datasets" / config.voice_id / "combined_prepared" / "lightning_logs"
+    # Training checkpoints are saved to: workspace/{voice_id}/datasets/prepared/lightning_logs/version_X/checkpoints/
+    training_checkpoints_dir = config.paths.prepared_dataset_dir / "lightning_logs"
     has_training_checkpoints = False
     checkpoint_count = 0
     checkpoint_info = "Training not started"
@@ -209,7 +214,7 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     )
     
     # Stage 9: Eval
-    samples_dir = config.paths.output_models_dir.parent / "samples" / config.voice_id
+    samples_dir = config.paths.training_samples_dir
     sample_files = list(samples_dir.glob("*.wav")) if samples_dir.exists() else []
     status["eval"] = (
         len(sample_files) > 0,

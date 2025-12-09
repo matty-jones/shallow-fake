@@ -21,7 +21,7 @@ def download_xtts_model(
     
     Args:
         model_name: Name of the TTS model to download
-        cache_dir: Directory to cache the model (default: models/xtts_baseline)
+        cache_dir: Directory to cache the model (default: models/shared/xtts_baseline)
         device: Device to use for download (default: cpu)
     
     Returns:
@@ -29,7 +29,7 @@ def download_xtts_model(
     """
     if cache_dir is None:
         project_root = Path.cwd()
-        cache_dir = project_root / "models" / "xtts_baseline"
+        cache_dir = project_root / "models" / "shared" / "xtts_baseline"
     
     cache_dir = Path(cache_dir)
     ensure_dir(cache_dir)
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         "--cache-dir",
         type=Path,
         default=None,
-        help="Directory to cache the model (default: models/xtts_baseline)",
+        help="Directory to cache the model (default: models/shared/xtts_baseline)",
     )
     parser.add_argument(
         "--device",

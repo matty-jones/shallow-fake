@@ -13,17 +13,9 @@ from shallow_fake.utils import ensure_dir, setup_logging
 logger = setup_logging()
 
 
-def prepare_tms_workspace(config: VoiceConfig):
-    """Prepare TMS workspace with dataset and checkpoint."""
-    tms_workspace = config.paths.tms_workspace_dir
+def prepare_workspace(config: VoiceConfig):
+    """Verify workspace is ready for training (no copying needed - files are already in workspace)."""
     combined_dataset = config.paths.combined_dataset_dir
-    tms_datasets_dir = tms_workspace / "datasets" / config.voice_id
-    tms_checkpoints_dir = tms_workspace / "checkpoints" / "base_checkpoints"
-
-    ensure_dir(tms_datasets_dir)
-    ensure_dir(tms_checkpoints_dir)
-
-    # Copy combined dataset to TMS workspace
     combined_metadata = combined_dataset / "metadata.csv"
     combined_wavs = combined_dataset / "wavs"
 
@@ -31,30 +23,22 @@ def prepare_tms_workspace(config: VoiceConfig):
         logger.error(f"Combined dataset metadata not found: {combined_metadata}")
         raise FileNotFoundError(f"Combined dataset metadata not found: {combined_metadata}")
 
-    # Create dataset structure in TMS workspace
-    tms_dataset_dir = tms_datasets_dir / "combined"
-    tms_wavs_dir = tms_dataset_dir / "wavs"
-    ensure_dir(tms_wavs_dir)
+    if not combined_wavs.exists() or len(list(combined_wavs.glob("*.wav"))) == 0:
+        logger.error(f"No WAV files found in {combined_wavs}")
+        raise FileNotFoundError(f"Combined dataset WAVs not found: {combined_wavs}")
 
-    # Copy metadata
-    import shutil
-    shutil.copy2(combined_metadata, tms_dataset_dir / "metadata.csv")
-
-    # Copy WAVs
-    logger.info(f"Copying WAVs from {combined_wavs} to {tms_wavs_dir}")
-    if combined_wavs.exists():
-        for wav_file in combined_wavs.glob("*.wav"):
-            shutil.copy2(wav_file, tms_wavs_dir / wav_file.name)
-
-    logger.info(f"TMS workspace prepared: {tms_workspace}")
+    logger.info(f"Workspace ready: {config.paths.workspace_dir}")
+    logger.info(f"  Combined dataset: {combined_dataset}")
+    logger.info(f"  Metadata: {combined_metadata}")
+    logger.info(f"  WAV files: {len(list(combined_wavs.glob('*.wav')))} files")
 
     # Check for base checkpoint
     base_checkpoint = config.training.base_checkpoint
-    checkpoint_path = tms_checkpoints_dir / base_checkpoint
+    checkpoint_path = config.paths.base_checkpoints_dir / base_checkpoint
     if not checkpoint_path.exists():
         logger.warning(f"Base checkpoint not found: {checkpoint_path}")
         logger.warning("Please download the base checkpoint and place it in:")
-        logger.warning(f"  {tms_checkpoints_dir}")
+        logger.warning(f"  {config.paths.base_checkpoints_dir}")
         logger.warning(f"Expected filename: {base_checkpoint}")
     else:
         logger.info(f"Base checkpoint found: {checkpoint_path}")
@@ -68,13 +52,13 @@ def launch_training(config: VoiceConfig):
         raise FileNotFoundError(f"Docker compose file not found: {compose_file}")
 
     # Prepare workspace
-    prepare_tms_workspace(config)
+    prepare_workspace(config)
 
     # Determine effective max epochs: just use the configured value
     # Since we're doing weights-only loading (not Lightning resume),
     # PyTorch Lightning will start from epoch 0, but the weights are already loaded
     max_epochs = config.training.max_epochs
-    checkpoint_path = config.paths.tms_workspace_dir / "checkpoints" / "base_checkpoints" / config.training.base_checkpoint
+    checkpoint_path = config.paths.base_checkpoints_dir / config.training.base_checkpoint
     if checkpoint_path.exists():
         logger.info(f"Base checkpoint found: {checkpoint_path}")
         logger.info(f"Training for {max_epochs} epochs with pre-loaded weights")

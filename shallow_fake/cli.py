@@ -265,7 +265,7 @@ def export(
 def eval(
     config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     phrases_file: Path = typer.Option(None, "--phrases-file", help="File with phrases to generate (one per line)"),
-    model_name: str = typer.Option(None, "--model-name", help="Model name (default: voice_id-quality)"),
+    model_name: str = typer.Option(None, "--model-name", help="Model name (default: <language>_<REGION>-<voice_id>-<quality>)"),
 ):
     """Generate evaluation samples from exported model."""
     console.print("[bold blue]Generating evaluation samples...[/bold blue]")

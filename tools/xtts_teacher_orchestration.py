@@ -73,7 +73,7 @@ def start_xtts_teacher(config: VoiceConfig) -> None:
 
     # Ensure teacher model cache directory exists
     project_root = Path.cwd()
-    model_cache_dir = project_root / "models" / "xtts_baseline"
+    model_cache_dir = project_root / "models" / "shared" / "xtts_baseline"
     ensure_dir(model_cache_dir)
     
     # Check if model is already cached, and download if needed

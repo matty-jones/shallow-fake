@@ -189,10 +189,10 @@ def tail_docker_logs(container_name: str, follow: bool = True):
 
 def check_tensorboard(logs_dir: Path, port: int = 6006):
     """Check if TensorBoard logs are available."""
-    lightning_logs = logs_dir / "lightning_logs"
-    if lightning_logs.exists():
-        logger.info(f"TensorBoard logs found: {lightning_logs}")
-        logger.info(f"Start TensorBoard with: tensorboard --logdir {lightning_logs} --port {port}")
+    # logs_dir is already the lightning_logs directory
+    if logs_dir.exists():
+        logger.info(f"TensorBoard logs found: {logs_dir}")
+        logger.info(f"Start TensorBoard with: tensorboard --logdir {logs_dir} --port {port}")
         return True
     return False
 
@@ -200,8 +200,9 @@ def check_tensorboard(logs_dir: Path, port: int = 6006):
 def monitor_training(config: VoiceConfig, follow_logs: bool = True, tensorboard: bool = False):
     """Monitor training progress."""
     container_name = f"tms-{config.voice_id}-trainer"
-    logs_dir = config.paths.tms_workspace_dir / "logs"
-    audio_samples_dir = config.paths.tms_workspace_dir / "audio_samples"
+    # Training logs are in the prepared dataset directory
+    logs_dir = config.paths.prepared_dataset_dir / "lightning_logs"
+    audio_samples_dir = config.paths.training_samples_dir
 
     logger.info(f"Monitoring training container: {container_name}")
     logger.info(f"Logs directory: {logs_dir}")

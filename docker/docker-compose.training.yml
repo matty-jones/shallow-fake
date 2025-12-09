@@ -30,7 +30,8 @@ services:
       - ACCELERATOR=${ACCELERATOR}
       - DEVICES=${DEVICES}
     volumes:
-      - ../tms_workspace:/workspace
+      - ../workspace:/workspace
+      - ../models/shared:/shared
     ports:
       - "6006:6006"   # TensorBoard
       - "8765:8765"   # TMS web UI (if present)
@@ -39,11 +40,11 @@ services:
       - -c
       - |
         echo 'Waiting for dataset to be ready...' &&
-        while [ ! -f /workspace/datasets/${PROJECT_NAME}/combined/metadata.csv ]; do
+        while [ ! -f /workspace/${PROJECT_NAME}/datasets/combined/metadata.csv ]; do
           sleep 5
         done &&
         echo 'Preprocessing dataset for Piper...' &&
-        python3 -m piper_train.preprocess --input-dir /workspace/datasets/${PROJECT_NAME}/combined --output-dir /workspace/datasets/${PROJECT_NAME}/combined_prepared --language en-us --sample-rate 22050 --dataset-format ljspeech --single-speaker &&
+        python3 -m piper_train.preprocess --input-dir /workspace/${PROJECT_NAME}/datasets/combined --output-dir /workspace/${PROJECT_NAME}/datasets/prepared --language en-us --sample-rate 22050 --dataset-format ljspeech --single-speaker &&
         echo 'Starting training (weights-only, no Lightning resume)...' &&
         python3 << 'PYEOF'
         import argparse, json, pathlib, torch, os
@@ -59,8 +60,8 @@ services:
         accelerator = os.environ.get('ACCELERATOR', 'gpu')
         devices = int(os.environ.get('DEVICES', '1'))
 
-        dataset_dir = pathlib.Path(f'/workspace/datasets/{project_name}/combined_prepared')
-        ckpt_path = pathlib.Path(f'/workspace/checkpoints/base_checkpoints/{base_checkpoint}')
+        dataset_dir = pathlib.Path(f'/workspace/{project_name}/datasets/prepared')
+        ckpt_path = pathlib.Path(f'/shared/base_checkpoints/{base_checkpoint}')
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--dataset-dir', required=False)

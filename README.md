@@ -43,15 +43,16 @@ shallow-fake init <project_name>
 ```
 
 This creates:
-- Required directory structure organized by project (`datasets/<project_name>/`, `models/<project_name>/`, etc.)
+- Required directory structure organized by project
 - Configuration file at `config/<project_name>.yaml`
-- Project-specific data directories (`data_raw/<project_name>/`, `data_processed/<project_name>/`)
-- Placeholder corpus file at `data_raw/external_corpus/corpus.txt` (shared across all projects)
+- Project-specific directories (`input/<project_name>/audio/`, `workspace/<project_name>/`, `models/<project_name>/`)
+- Shared resources (`models/shared/`, `input/shared/`)
+- Placeholder corpus file at `input/shared/corpus.txt` (shared across all projects)
 
 2. **Place your raw audio files:**
 ```bash
 # Copy your audio files to:
-data_raw/<project_name>/input_audio/
+input/<project_name>/audio/
 ```
 
 3. **Run the pipeline:**
@@ -96,7 +97,7 @@ shallow-fake asr-segment --config claudia.yaml --cpu
 This is useful if you encounter CUDA/cuDNN issues and want to use CPU without editing the config file.
 
 **Teacher Model Integration**: The `build-synth` command automatically starts a teacher model service (if configured) to generate high-quality synthetic voice data. The service:
-- Uses reference audio from your cleaned real dataset (`datasets/<project_name>/real_clean/wavs`)
+- Uses reference audio from your real dataset (`workspace/<project_name>/datasets/real/wavs`)
 - Starts automatically when `build-synth` runs
 - Stops automatically after synthetic data generation completes
 - Requires Docker to be running
@@ -104,17 +105,29 @@ This is useful if you encounter CUDA/cuDNN issues and want to use CPU without ed
 
 ## Project Structure
 
-- `tools/` - Pipeline scripts
+The repository uses a unified directory structure to minimize duplication and simplify organization:
+
+- `input/<project_name>/audio/` - User input audio files (one clear location)
+- `workspace/<project_name>/` - All working data for a project (unified workspace)
+  - `segments/` - Extracted audio segments from ASR
+  - `datasets/` - Dataset directories
+    - `real/` - Real voice dataset
+    - `synth/` - Synthetic dataset
+    - `combined/` - Combined dataset (for training)
+    - `prepared/` - Preprocessed dataset (training cache, logs, checkpoints)
+  - `training/` - Training outputs
+    - `checkpoints/` - Exported model checkpoints
+    - `samples/` - Sample audio outputs
+- `models/<project_name>/` - Final exported ONNX models
+- `models/shared/` - Shared resources
+  - `base_checkpoints/` - Base model checkpoints (shared across projects)
+  - `xtts_baseline/` - Teacher model cache (shared across all projects)
+- `input/shared/` - Shared input files
+  - `corpus.txt` - Text corpus for synthetic data generation (shared across all projects)
 - `config/` - YAML configuration files (one per project)
-- `data_raw/<project_name>/` - Input audio (organized by project)
-- `data_raw/external_corpus/` - Text corpus for synthetic data generation (shared across all projects)
-- `data_processed/<project_name>/` - Normalized audio and segments (organized by project)
-- `datasets/<project_name>/` - Real, synthetic, and combined datasets (organized by project)
-- `tms_workspace/` - TMS training workspace (shared)
-- `models/<project_name>/` - Final exported ONNX models (organized by project)
-- `models/xtts_baseline/` - Teacher model baseline cache (shared across all projects, note: directory name remains xtts_baseline for compatibility)
-- `samples/<project_name>/` - Evaluation audio samples (organized by project)
+- `tools/` - Pipeline scripts
 - `services/` - Teacher model service implementation
+- `docker/` - Docker compose files and Dockerfiles
 
 ## Documentation
 

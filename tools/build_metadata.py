@@ -1,7 +1,7 @@
 """Build dataset metadata in LJSpeech format."""
 
 import json
-import shutil
+import os
 from pathlib import Path
 
 from shallow_fake.config import VoiceConfig
@@ -69,9 +69,14 @@ def build_metadata(config: VoiceConfig, min_words: int = 3, max_words: int = 50,
             logger.warning(f"Segment WAV not found: {source_wav}")
             continue
 
-        # Copy to dataset directory
+        # Create hard link to segment (no copying)
         dest_wav = wavs_dir / f"{segment_id}.wav"
-        shutil.copy2(source_wav, dest_wav)
+        try:
+            os.link(source_wav, dest_wav)
+        except OSError:
+            # Fall back to copy if hard link fails (cross-filesystem)
+            import shutil
+            shutil.copy2(source_wav, dest_wav)
 
         # Build metadata line (LJSpeech format: wavs/filename.wav|transcript)
         text = segment["text"].strip()

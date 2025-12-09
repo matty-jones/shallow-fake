@@ -1,6 +1,6 @@
 """Combine real and synthetic datasets."""
 
-import shutil
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -26,18 +26,15 @@ def combine_datasets(config: VoiceConfig, subsample_synth: Optional[float] = Non
 
     ensure_dir(combined_wavs_dir)
 
-    # Use cleaned datasets if they exist
-    real_clean_dir = real_dir.parent / f"{real_dir.name}_clean"
-    synth_clean_dir = synth_dir.parent / f"{synth_dir.name}_clean"
-
-    real_metadata = real_clean_dir / "metadata.csv" if (real_clean_dir / "metadata.csv").exists() else real_dir / "metadata.csv"
-    synth_metadata = synth_clean_dir / "metadata.csv" if (synth_clean_dir / "metadata.csv").exists() else synth_dir / "metadata.csv"
+    # Use real and synth datasets directly (verification is now in-place)
+    real_metadata = real_dir / "metadata.csv"
+    synth_metadata = synth_dir / "metadata.csv"
 
     all_entries = []
 
     # Read real dataset
     if real_metadata.exists():
-        real_wavs_dir = real_clean_dir / "wavs" if (real_clean_dir / "wavs").exists() else real_dir / "wavs"
+        real_wavs_dir = real_dir / "wavs"
         logger.info(f"Reading real dataset from {real_metadata}")
         with open(real_metadata, "r", encoding="utf-8") as f:
             for line in f:
@@ -55,7 +52,7 @@ def combine_datasets(config: VoiceConfig, subsample_synth: Optional[float] = Non
     # Read synthetic dataset
     synth_entries = []
     if synth_metadata.exists():
-        synth_wavs_dir = synth_clean_dir / "wavs" if (synth_clean_dir / "wavs").exists() else synth_dir / "wavs"
+        synth_wavs_dir = synth_dir / "wavs"
         logger.info(f"Reading synthetic dataset from {synth_metadata}")
         with open(synth_metadata, "r", encoding="utf-8") as f:
             for line in f:
@@ -86,9 +83,14 @@ def combine_datasets(config: VoiceConfig, subsample_synth: Optional[float] = Non
     metadata_lines = []
 
     for source_type, wav_path, text, source_wav in all_entries:
-        # Copy WAV to combined directory
+        # Create hard link to WAV (no copying)
         dest_wav = combined_wavs_dir / source_wav.name
-        shutil.copy2(source_wav, dest_wav)
+        try:
+            os.link(source_wav, dest_wav)
+        except OSError:
+            # Fall back to copy if hard link fails (cross-filesystem)
+            import shutil
+            shutil.copy2(source_wav, dest_wav)
 
         # Build metadata line
         combined_wav_path = f"wavs/{source_wav.name}"

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List
 
 from shallow_fake.config import VoiceConfig
+from shallow_fake.language_utils import format_model_name
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
@@ -78,7 +79,13 @@ def eval_model(config: VoiceConfig, phrases: List[str] = None, model_name: str =
         phrases = DEFAULT_PHRASES
 
     if model_name is None:
-        model_name = f"{config.voice_id}-{config.training.quality}"
+        # Use Piper naming convention: <language>_<REGION>-<name>-<quality>
+        model_name = format_model_name(
+            config.language_code,
+            config.region,
+            config.voice_id,
+            config.training.quality
+        )
 
     model_path = config.paths.output_models_dir / f"{model_name}.onnx"
     json_path = config.paths.output_models_dir / f"{model_name}.onnx.json"

@@ -1,15 +1,11 @@
 voice_id: voice1
 language: en_GB
 paths:
-  raw_audio_dir: data_raw/voice1/input_audio
-  normalized_dir: data_processed/voice1/normalized
-  segments_dir: data_processed/voice1/segments
-  asr_metadata: data_processed/voice1/asr_segments.jsonl
-  real_dataset_dir: datasets/voice1/real
-  synth_dataset_dir: datasets/voice1/synth
-  combined_dataset_dir: datasets/voice1/combined
-  tms_workspace_dir: tms_workspace
-  output_models_dir: models/voice1
+  input_audio_dir: input/voice1/audio
+  workspace_dir: workspace/voice1
+  models_dir: models/voice1
+  shared_models_dir: models/shared
+  corpus_path: input/shared/corpus.txt
 asr:
   model_size: medium.en
   device: cuda
@@ -18,12 +14,11 @@ asr:
   min_segment_seconds: 1.0
   min_confidence: 0.7
 phoneme_check:
-  language: en-gb
   max_phoneme_distance: 0.1
   use_tts_roundtrip: true
 synthetic:
   enabled: true
-  corpus_text_path: data_raw/external_corpus/corpus.txt
+  corpus_text_path: input/shared/corpus.txt
   max_sentences: 2000
   tts_backend: http
   tts_http:

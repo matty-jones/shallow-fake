@@ -13,6 +13,7 @@ from faster_whisper import WhisperModel
 from piper_phonemize import phonemize_espeak
 
 from shallow_fake.config import VoiceConfig
+from shallow_fake.language_utils import convert_language_for_phoneme
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
@@ -188,9 +189,10 @@ def verify_dataset_entry(
         logger.warning(f"Failed to transcribe audio, skipping verification")
         return False, 1.0, ""
 
-    # Phonemize both texts
-    canonical_phonemes = phonemize_text(canonical_text, config.phoneme_check.language)
-    whisper_phonemes = phonemize_text(whisper_text, config.phoneme_check.language)
+    # Phonemize both texts (convert language format for phoneme checking)
+    phoneme_language = convert_language_for_phoneme(config.language)
+    canonical_phonemes = phonemize_text(canonical_text, phoneme_language)
+    whisper_phonemes = phonemize_text(whisper_text, phoneme_language)
 
     if not canonical_phonemes or not whisper_phonemes:
         logger.warning(f"Failed to phonemize text, skipping verification")
@@ -238,11 +240,9 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
         logger.error(f"Metadata file not found: {metadata_csv}")
         raise FileNotFoundError(f"Metadata file not found: {metadata_csv}")
 
-    # Create cleaned dataset directory
-    cleaned_dir = real_dataset_dir.parent / f"{real_dataset_dir.name}_clean"
-    cleaned_wavs_dir = cleaned_dir / "wavs"
-    cleaned_metadata_csv = cleaned_dir / "metadata.csv"
-    ensure_dir(cleaned_wavs_dir)
+    # Verify in-place (update metadata, remove invalid files)
+    # No separate _clean directory needed
+    ensure_dir(wavs_dir)
 
     # Read metadata
     entries = []
@@ -332,16 +332,18 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
         distances.append(distance)
         
         if is_valid and audio_path:
-            # Copy to cleaned dataset
-            dest_wav = cleaned_wavs_dir / audio_path.name
-            shutil.copy2(audio_path, dest_wav)
+            # Keep file (already in place)
             valid_entries.append((wav_path, original_text))
         else:
+            # Remove invalid file
+            if audio_path and audio_path.exists():
+                audio_path.unlink()
+                logger.debug(f"Removed invalid file: {audio_path}")
             invalid_entries.append((wav_path, original_text, distance, whisper_text))
 
-    # Write cleaned metadata
-    logger.info(f"Writing cleaned metadata with {len(valid_entries)} entries")
-    with open(cleaned_metadata_csv, "w", encoding="utf-8") as f:
+    # Write updated metadata (in-place, only valid entries)
+    logger.info(f"Writing updated metadata with {len(valid_entries)} entries")
+    with open(metadata_csv, "w", encoding="utf-8") as f:
         for wav_path, text in valid_entries:
             f.write(f"{wav_path}|{text}\n")
 
@@ -356,7 +358,7 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
         logger.info(f"Average phoneme distance: {sum(distances) / len(distances):.4f}")
         logger.info(f"Min distance: {min(distances):.4f}")
         logger.info(f"Max distance: {max(distances):.4f}")
-    logger.info(f"Cleaned dataset: {cleaned_dir}")
+    logger.info(f"Updated dataset: {real_dataset_dir}")
     logger.info("=" * 60)
 
     if invalid_entries:
@@ -368,20 +370,8 @@ def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
         
         logger.info("")
         logger.info("=" * 60)
-        logger.info("Manual Recovery Instructions")
-        logger.info("=" * 60)
-        logger.info("If you agree with the Original transcription (not the Whisper transcription),")
-        logger.info("you can manually add these rejected entries to the cleaned dataset.")
-        logger.info("")
-        logger.info("Run the following commands to add all rejected entries:")
-        logger.info("")
-        
-        # Generate commands for all rejected entries
-        for wav_path, text, distance, whisper_text in invalid_entries:
-            logger.info(f'echo "{wav_path}|{text}" >> {cleaned_metadata_csv}')
-            logger.info(f"cp {wavs_dir / Path(wav_path).name} {cleaned_wavs_dir / Path(wav_path).name}")
-        
-        logger.info("")
+        logger.info("Note: Invalid entries have been removed from the dataset.")
+        logger.info("If you need to recover any entries, restore them from backup.")
         logger.info("=" * 60)
 
 

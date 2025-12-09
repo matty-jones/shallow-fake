@@ -134,18 +134,16 @@ def extract_segment_audio(
 
 
 def process_audio_files(config: VoiceConfig):
-    """Process all audio files in the raw audio directory."""
-    raw_dir = config.paths.raw_audio_dir
-    normalized_dir = config.paths.normalized_dir
+    """Process all audio files in the input audio directory."""
+    input_dir = config.paths.input_audio_dir
     segments_dir = config.paths.segments_dir
     metadata_path = config.paths.asr_metadata
 
-    ensure_dir(normalized_dir)
     ensure_dir(segments_dir)
 
-    audio_files = find_audio_files(raw_dir)
+    audio_files = find_audio_files(input_dir)
     if not audio_files:
-        logger.warning(f"No audio files found in {raw_dir}")
+        logger.warning(f"No audio files found in {input_dir}")
         return
 
     logger.info(f"Found {len(audio_files)} audio file(s) to process")
@@ -156,38 +154,46 @@ def process_audio_files(config: VoiceConfig):
     for audio_file in audio_files:
         logger.info(f"Processing: {audio_file.name}")
 
-        # Normalize audio
-        normalized_path = normalized_dir / f"{audio_file.stem}.wav"
-        normalize_audio(audio_file, normalized_path)
+        # Create temporary normalized file for segmentation
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            normalized_path = Path(tmp.name)
+        
+        try:
+            normalize_audio(audio_file, normalized_path)
 
-        # Segment with Whisper
-        segments = segment_audio_with_whisper(
-            normalized_path,
-            config.asr.model_size,
-            config.asr.device,
-            config.asr.beam_size,
-            config.asr.min_segment_seconds,
-            config.asr.max_segment_seconds,
-            config.asr.min_confidence,
-        )
-
-        # Extract segment audio files
-        for seg in segments:
-            segment_id = f"seg_{segment_counter:04d}"
-            segment_wav = segments_dir / f"{segment_id}.wav"
-
-            extract_segment_audio(
+            # Segment with Whisper
+            segments = segment_audio_with_whisper(
                 normalized_path,
-                seg["start"],
-                seg["end"],
-                segment_wav,
+                config.asr.model_size,
+                config.asr.device,
+                config.asr.beam_size,
+                config.asr.min_segment_seconds,
+                config.asr.max_segment_seconds,
+                config.asr.min_confidence,
             )
 
-            # Add metadata
-            seg["id"] = segment_id
-            seg["audio_path"] = str(segment_wav.relative_to(segments_dir.parent))
-            all_segments.append(seg)
-            segment_counter += 1
+            # Extract segment audio files directly from source (normalized on-the-fly)
+            for seg in segments:
+                segment_id = f"seg_{segment_counter:04d}"
+                segment_wav = segments_dir / f"{segment_id}.wav"
+
+                extract_segment_audio(
+                    normalized_path,
+                    seg["start"],
+                    seg["end"],
+                    segment_wav,
+                )
+
+                # Add metadata
+                seg["id"] = segment_id
+                seg["audio_path"] = str(segment_wav.relative_to(segments_dir.parent))
+                all_segments.append(seg)
+                segment_counter += 1
+        finally:
+            # Clean up temporary normalized file
+            if normalized_path.exists():
+                normalized_path.unlink()
 
     # Write JSONL metadata
     logger.info(f"Writing {len(all_segments)} segments to {metadata_path}")

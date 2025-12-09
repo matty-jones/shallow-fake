@@ -9,17 +9,69 @@ from pydantic_settings import BaseSettings
 
 
 class PathsConfig(BaseModel):
-    """Path configuration for data directories."""
+    """Simplified path configuration for unified directory structure."""
 
-    raw_audio_dir: Path
-    normalized_dir: Path
-    segments_dir: Path
-    asr_metadata: Path
-    real_dataset_dir: Path
-    synth_dataset_dir: Path
-    combined_dataset_dir: Path
-    tms_workspace_dir: Path
-    output_models_dir: Path
+    input_audio_dir: Path  # input/{voice_id}/audio
+    workspace_dir: Path  # workspace/{voice_id}
+    models_dir: Path  # models/{voice_id}
+    shared_models_dir: Path  # models/shared
+    corpus_path: Path  # input/shared/corpus.txt
+
+    # Computed properties for backward compatibility and convenience
+    @property
+    def segments_dir(self) -> Path:
+        """Segments directory within workspace."""
+        return self.workspace_dir / "segments"
+
+    @property
+    def asr_metadata(self) -> Path:
+        """ASR metadata file."""
+        return self.workspace_dir / "segments" / "asr_metadata.jsonl"
+
+    @property
+    def real_dataset_dir(self) -> Path:
+        """Real dataset directory."""
+        return self.workspace_dir / "datasets" / "real"
+
+    @property
+    def synth_dataset_dir(self) -> Path:
+        """Synthetic dataset directory."""
+        return self.workspace_dir / "datasets" / "synth"
+
+    @property
+    def combined_dataset_dir(self) -> Path:
+        """Combined dataset directory."""
+        return self.workspace_dir / "datasets" / "combined"
+
+    @property
+    def prepared_dataset_dir(self) -> Path:
+        """Prepared dataset directory for training."""
+        return self.workspace_dir / "datasets" / "prepared"
+
+    @property
+    def training_dir(self) -> Path:
+        """Training outputs directory."""
+        return self.workspace_dir / "training"
+
+    @property
+    def training_checkpoints_dir(self) -> Path:
+        """Training checkpoints directory."""
+        return self.workspace_dir / "training" / "checkpoints"
+
+    @property
+    def training_samples_dir(self) -> Path:
+        """Training samples directory."""
+        return self.workspace_dir / "training" / "samples"
+
+    @property
+    def output_models_dir(self) -> Path:
+        """Output models directory (alias for models_dir)."""
+        return self.models_dir
+
+    @property
+    def base_checkpoints_dir(self) -> Path:
+        """Base checkpoints directory."""
+        return self.shared_models_dir / "base_checkpoints"
 
 
 class ASRConfig(BaseModel):
@@ -36,7 +88,6 @@ class ASRConfig(BaseModel):
 class PhonemeCheckConfig(BaseModel):
     """Phoneme verification configuration."""
 
-    language: str = Field(default="en-gb")
     max_phoneme_distance: float = Field(default=0.1, ge=0.0, le=1.0)
     use_tts_roundtrip: bool = Field(default=True)
     parallel_workers: int = Field(default=4, ge=1, le=16, description="Number of parallel workers for verification. Each worker loads its own Whisper model (~500MB RAM per worker).")
@@ -120,7 +171,9 @@ class VoiceConfig(BaseModel):
     """Complete voice pipeline configuration."""
 
     voice_id: str = Field(default="")  # Will be auto-detected from path if not set
-    language: str = Field(default="en_GB")
+    language: str = Field(description="Language code in format 'en_GB' or 'en-US'. Required for model naming and phoneme checking.")
+    language_code: Optional[str] = Field(default=None, description="Language code (e.g., 'en'). Auto-parsed from 'language' if not set.")
+    region: Optional[str] = Field(default=None, description="Region code (e.g., 'GB'). Auto-parsed from 'language' if not set.")
     paths: PathsConfig
     asr: ASRConfig
     phoneme_check: PhonemeCheckConfig
@@ -151,6 +204,19 @@ class VoiceConfig(BaseModel):
         if isinstance(v, dict) and "docker_compose_file" in v:
             v["docker_compose_file"] = Path(v["docker_compose_file"])
         return v
+
+    @model_validator(mode="after")
+    def parse_language_fields(self):
+        """Parse language_code and region from language field if not explicitly set."""
+        from shallow_fake.language_utils import parse_language_code
+        
+        if self.language_code is None or self.region is None:
+            lang_code, region = parse_language_code(self.language)
+            if self.language_code is None:
+                self.language_code = lang_code
+            if self.region is None:
+                self.region = region
+        return self
 
     @classmethod
     def from_yaml(cls, config_path: Path) -> "VoiceConfig":
@@ -185,34 +251,57 @@ class VoiceConfig(BaseModel):
             if isinstance(compose_path, str):
                 data["tms"]["docker_compose_file"] = str(project_root / compose_path)
 
-        # Auto-detect project name from real_dataset_dir
-        # Project name is the directory name in datasets/<project_name>/real
-        if "paths" in data and "real_dataset_dir" in data["paths"]:
-            real_dataset_path = Path(data["paths"]["real_dataset_dir"])
-            # Extract project name from path: datasets/<project_name>/real
-            if "datasets" in real_dataset_path.parts:
-                datasets_idx = real_dataset_path.parts.index("datasets")
-                if datasets_idx + 1 < len(real_dataset_path.parts):
-                    detected_project_name = real_dataset_path.parts[datasets_idx + 1]
-                    # Always use detected project name from directory structure
-                    # This ensures voice_id matches the actual project directory
-                    if "voice_id" not in data or not data.get("voice_id"):
-                        data["voice_id"] = detected_project_name
-                    elif data["voice_id"] != detected_project_name:
-                        # Warn if mismatch and override with detected name
-                        import warnings
-                        warnings.warn(
-                            f"voice_id '{data['voice_id']}' doesn't match project name "
-                            f"'{detected_project_name}' from directory structure. "
-                            f"Using '{detected_project_name}' as voice_id."
-                        )
-                        data["voice_id"] = detected_project_name
+        # Auto-detect project name from workspace_dir or input_audio_dir
+        # New structure: workspace/<project_name> or input/<project_name>/audio
+        detected_project_name = None
+        if "paths" in data:
+            # Try workspace_dir first (new structure)
+            if "workspace_dir" in data["paths"]:
+                workspace_path = Path(data["paths"]["workspace_dir"])
+                if "workspace" in workspace_path.parts:
+                    workspace_idx = workspace_path.parts.index("workspace")
+                    if workspace_idx + 1 < len(workspace_path.parts):
+                        detected_project_name = workspace_path.parts[workspace_idx + 1]
+            # Try input_audio_dir (new structure)
+            elif "input_audio_dir" in data["paths"]:
+                input_path = Path(data["paths"]["input_audio_dir"])
+                if "input" in input_path.parts:
+                    input_idx = input_path.parts.index("input")
+                    if input_idx + 1 < len(input_path.parts):
+                        detected_project_name = input_path.parts[input_idx + 1]
+            # Fallback to old structure detection
+            elif "real_dataset_dir" in data["paths"]:
+                real_dataset_path = Path(data["paths"]["real_dataset_dir"])
+                if "datasets" in real_dataset_path.parts:
+                    datasets_idx = real_dataset_path.parts.index("datasets")
+                    if datasets_idx + 1 < len(real_dataset_path.parts):
+                        detected_project_name = real_dataset_path.parts[datasets_idx + 1]
+
+        # Set voice_id from detected name
+        if detected_project_name:
+            if "voice_id" not in data or not data.get("voice_id"):
+                data["voice_id"] = detected_project_name
+            elif data["voice_id"] != detected_project_name:
+                import warnings
+                warnings.warn(
+                    f"voice_id '{data['voice_id']}' doesn't match project name "
+                    f"'{detected_project_name}' from directory structure. "
+                    f"Using '{detected_project_name}' as voice_id."
+                )
+                data["voice_id"] = detected_project_name
 
         # Ensure voice_id is set
         if not data.get("voice_id"):
             raise ValueError(
-                "Could not determine project name from real_dataset_dir path. "
-                "Path must contain 'datasets/<project_name>/real' structure."
+                "Could not determine project name from paths. "
+                "Please set voice_id explicitly or ensure paths contain project name."
+            )
+
+        # Ensure language is set (required field)
+        if "language" not in data or not data.get("language"):
+            raise ValueError(
+                "Language is required. Please set 'language' at the top level of the config "
+                "(e.g., 'language: en_GB' or 'language: en-US')."
             )
 
         return cls(**data)
@@ -222,16 +311,24 @@ class VoiceConfig(BaseModel):
         # Safeguard: prevent creating directories in config/ directory
         config_dir = Path("config").resolve()
         
-        for path in [
-            self.paths.raw_audio_dir,
-            self.paths.normalized_dir,
+        # Core directories
+        directories = [
+            self.paths.input_audio_dir,
+            self.paths.workspace_dir,
+            self.paths.models_dir,
+            self.paths.shared_models_dir,
             self.paths.segments_dir,
             self.paths.real_dataset_dir,
             self.paths.synth_dataset_dir,
             self.paths.combined_dataset_dir,
-            self.paths.tms_workspace_dir,
-            self.paths.output_models_dir,
-        ]:
+            self.paths.prepared_dataset_dir,
+            self.paths.training_dir,
+            self.paths.training_checkpoints_dir,
+            self.paths.training_samples_dir,
+            self.paths.base_checkpoints_dir,
+        ]
+        
+        for path in directories:
             resolved_path = path.resolve()
             # Check if path would be created inside config/ directory
             if str(resolved_path).startswith(str(config_dir)):
@@ -241,8 +338,11 @@ class VoiceConfig(BaseModel):
                 )
             path.mkdir(parents=True, exist_ok=True)
 
-        # Create subdirectories
+        # Create dataset subdirectories
         (self.paths.real_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
         (self.paths.synth_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
         (self.paths.combined_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
+        
+        # Ensure corpus directory exists
+        self.paths.corpus_path.parent.mkdir(parents=True, exist_ok=True)
 

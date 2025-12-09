@@ -31,36 +31,28 @@ def initialize_project(project_name: str, base_dir: Path = None):
 
     console.print(f"[bold blue]Initializing project: {project_name}[/bold blue]")
 
-    # Create directory structure (organized by project)
+    # Create new unified directory structure
     directories = [
-        base_dir / "data_raw" / project_name / "input_audio",
-        base_dir / "data_processed" / project_name / "normalized",
-        base_dir / "data_processed" / project_name / "segments",
-        base_dir / "datasets" / project_name / "real" / "wavs",
-        base_dir / "datasets" / project_name / "synth" / "wavs",
-        base_dir / "datasets" / project_name / "combined" / "wavs",
-        base_dir / "tms_workspace" / "datasets",
-        base_dir / "tms_workspace" / "checkpoints" / "base_checkpoints",
-        base_dir / "tms_workspace" / "logs",
-        base_dir / "tms_workspace" / "audio_samples",
+        base_dir / "input" / project_name / "audio",
+        base_dir / "workspace" / project_name / "segments",
+        base_dir / "workspace" / project_name / "datasets" / "real" / "wavs",
+        base_dir / "workspace" / project_name / "datasets" / "synth" / "wavs",
+        base_dir / "workspace" / project_name / "datasets" / "combined" / "wavs",
+        base_dir / "workspace" / project_name / "datasets" / "prepared",
+        base_dir / "workspace" / project_name / "training" / "checkpoints",
+        base_dir / "workspace" / project_name / "training" / "samples",
         base_dir / "models" / project_name,
-        base_dir / "samples" / project_name,
+        base_dir / "models" / "shared" / "base_checkpoints",
+        base_dir / "models" / "shared" / "xtts_baseline",
+        base_dir / "input" / "shared",
     ]
 
     for directory in directories:
         ensure_dir(directory)
         console.print(f"  Created: {directory}")
 
-    # Create project-agnostic external corpus directory (shared across all projects)
-    external_corpus_dir = base_dir / "data_raw" / "external_corpus"
-    was_new = not external_corpus_dir.exists()
-    ensure_dir(external_corpus_dir)
-    if was_new:
-        console.print(f"  Created: {external_corpus_dir}")
-
-    # Create teacher model baseline directory (universal across all projects)
-    # Note: Directory name remains xtts_baseline for compatibility with existing setups
-    xtts_baseline_dir = base_dir / "models" / "xtts_baseline"
+    # Create teacher model baseline directory (shared across all projects)
+    xtts_baseline_dir = base_dir / "models" / "shared" / "xtts_baseline"
     was_new_xtts = not xtts_baseline_dir.exists()
     ensure_dir(xtts_baseline_dir)
     if was_new_xtts:
@@ -75,15 +67,11 @@ def initialize_project(project_name: str, base_dir: Path = None):
         "voice_id": project_name,
         "language": "en_GB",
         "paths": {
-            "raw_audio_dir": f"data_raw/{project_name}/input_audio",
-            "normalized_dir": f"data_processed/{project_name}/normalized",
-            "segments_dir": f"data_processed/{project_name}/segments",
-            "asr_metadata": f"data_processed/{project_name}/asr_segments.jsonl",
-            "real_dataset_dir": f"datasets/{project_name}/real",
-            "synth_dataset_dir": f"datasets/{project_name}/synth",
-            "combined_dataset_dir": f"datasets/{project_name}/combined",
-            "tms_workspace_dir": "tms_workspace",
-            "output_models_dir": f"models/{project_name}",
+            "input_audio_dir": f"input/{project_name}/audio",
+            "workspace_dir": f"workspace/{project_name}",
+            "models_dir": f"models/{project_name}",
+            "shared_models_dir": "models/shared",
+            "corpus_path": "input/shared/corpus.txt",
         },
         "asr": {
             "model_size": "medium.en",
@@ -94,14 +82,13 @@ def initialize_project(project_name: str, base_dir: Path = None):
             "min_confidence": 0.7,
         },
         "phoneme_check": {
-            "language": "en-gb",
             "max_phoneme_distance": 0.1,
             "use_tts_roundtrip": True,
             "parallel_workers": 4,
         },
         "synthetic": {
             "enabled": True,
-            "corpus_text_path": "data_raw/external_corpus/corpus.txt",
+            "corpus_text_path": "input/shared/corpus.txt",
             "max_sentences": 2000,
             "tts_backend": "http",
             "tts_http": {
@@ -114,7 +101,7 @@ def initialize_project(project_name: str, base_dir: Path = None):
                 "model_name": "tts_models/multilingual/multi-dataset/xtts_v2",
                 "language": "en",
                 "device": "cuda",
-                "reference_audio_dir": f"datasets/{project_name}/real_clean/wavs",
+                "reference_audio_dir": f"workspace/{project_name}/datasets/real/wavs",
                 "num_reference_clips": 3,
                 "workers": 3,
             },
@@ -142,8 +129,8 @@ def initialize_project(project_name: str, base_dir: Path = None):
 
     console.print(f"  Created: {config_file}")
 
-    # Create placeholder corpus file (project-agnostic, shared across all projects)
-    corpus_file = base_dir / "data_raw" / "external_corpus" / "corpus.txt"
+    # Create placeholder corpus file (shared across all projects)
+    corpus_file = base_dir / "input" / "shared" / "corpus.txt"
     if not corpus_file.exists():
         corpus_file.write_text(
             "# Add your text corpus here, one sentence per line.\n"
@@ -154,8 +141,8 @@ def initialize_project(project_name: str, base_dir: Path = None):
 
     console.print(f"\n[green]Project '{project_name}' initialized successfully![/green]")
     console.print(f"\nNext steps:")
-    console.print(f"  1. Place your raw audio files in: [cyan]data_raw/{project_name}/input_audio/[/cyan]")
-    console.print(f"  2. (Optional) Add text corpus to: [cyan]data_raw/external_corpus/corpus.txt[/cyan]")
+    console.print(f"  1. Place your raw audio files in: [cyan]input/{project_name}/audio/[/cyan]")
+    console.print(f"  2. (Optional) Add text corpus to: [cyan]input/shared/corpus.txt[/cyan]")
     console.print(f"  3. Review and adjust: [cyan]config/{project_name}.yaml[/cyan]")
     console.print(f"  4. Run: [cyan]shallow-fake asr-segment --config {project_name}.yaml[/cyan]")
 

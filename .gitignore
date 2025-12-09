@@ -15,13 +15,10 @@ env/
 dist/
 build/
 
-# Data directories
-data_raw/
-data_processed/
-datasets/
-tms_workspace/
+# Data directories (new unified structure)
+input/
+workspace/
 models/
-samples/
 
 # IDE
 .vscode/
@@ -42,10 +39,27 @@ logs/
 *.ckpt
 *.onnx
 *.onnx.json
+*.pth
+
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.webm
+
+# Dataset files
+*.jsonl
+metadata.csv
 
 # XTTS model cache (keep directory structure, ignore contents)
-models/xtts_baseline/**
-!models/xtts_baseline/.gitkeep
+models/shared/xtts_baseline/**
+!models/shared/xtts_baseline/.gitkeep
+
+# Shared resources (keep structure, ignore large files)
+models/shared/base_checkpoints/*.ckpt
+input/shared/corpus.txt
 
 # Temporary files
 *.tmp

@@ -96,7 +96,7 @@ def get_tts_model() -> TTS:
     
     use_gpu = DEVICE == "cuda"
     
-    # Model cache is mounted at ~/tts from host's models/xtts_baseline/tts
+    # Model cache is mounted at ~/tts from host's models/shared/xtts_baseline/tts
     # When TTS_HOME=/root, TTS uses /root/tts/ for models
     # Ensure TOS acceptance file exists (should be created on host, but create if missing)
     # TTS looks for TOS file in the tts directory
