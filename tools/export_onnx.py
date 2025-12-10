@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from shallow_fake.config import VoiceConfig
-from shallow_fake.language_utils import format_model_name, get_language_metadata
+from shallow_fake.language_utils import format_model_name, get_language_metadata, get_espeak_voice
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
@@ -289,6 +289,13 @@ def export_onnx(config: VoiceConfig, checkpoint_path: Optional[Path] = None):
             "name_english": language_metadata["name_english"],
             "country_english": language_metadata["country_english"],
         }
+        
+        # Add espeak voice mapping
+        espeak_voice = get_espeak_voice(config.language_code, config.region)
+        if "espeak" not in onnx_data:
+            onnx_data["espeak"] = {}
+        onnx_data["espeak"]["voice"] = espeak_voice
+        logger.info(f"Set espeak voice to: {espeak_voice}")
         
         # Write the updated onnx.json
         with open(json_path, "w", encoding="utf-8") as f:

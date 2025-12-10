@@ -202,3 +202,63 @@ def convert_language_for_phoneme(language: str) -> str:
         # No region specified, return as-is (lowercase)
         return normalized.lower()
 
+
+# Espeak voice mapping
+# Maps (language_code, region) to espeak voice names
+# Based on valid espeak voices from espeak-ng --voices
+ESPEAK_VOICE_MAPPING: Dict[Tuple[str, str], str] = {
+    # English variants
+    ("en", "GB"): "en-gb-x-rp",  # Received Pronunciation (preferred for GB)
+    ("en", "US"): "en-us",
+    ("en", "AU"): "en",  # Fallback to generic English
+    ("en", "CA"): "en",  # Fallback to generic English
+    ("en", "IE"): "en",  # Fallback to generic English
+    ("en", "NZ"): "en",  # Fallback to generic English
+    # Spanish variants
+    ("es", "ES"): "es",  # Spanish (Spain)
+    ("es", "MX"): "es-419",  # Spanish (Latin America)
+    # French variants
+    ("fr", "FR"): "fr-fr",
+    ("fr", "BE"): "fr-be",
+    ("fr", "CH"): "fr-ch",
+    # Portuguese variants
+    ("pt", "PT"): "pt",  # Portuguese (Portugal)
+    ("pt", "BR"): "pt-br",  # Portuguese (Brazil)
+    # Other languages (use language code directly)
+    ("de", "DE"): "de",
+    ("it", "IT"): "it",
+    ("nl", "NL"): "nl",
+    ("pl", "PL"): "pl",
+    ("ru", "RU"): "ru",
+    ("ru", "LV"): "ru-lv",
+    ("ja", "JP"): "ja",
+    ("zh", "CN"): "cmn",  # Chinese (Mandarin)
+    ("ko", "KR"): "ko",
+    # Add more mappings as needed
+}
+
+
+def get_espeak_voice(language_code: str, region: str) -> str:
+    """
+    Get espeak voice name for a given language code and region.
+    
+    Maps language codes to valid espeak voices based on the espeak-ng voice list.
+    For en_GB, returns 'en-gb-x-rp' (Received Pronunciation) as preferred.
+    
+    Args:
+        language_code: Language code (e.g., 'en')
+        region: Region code (e.g., 'GB')
+        
+    Returns:
+        Espeak voice name (e.g., 'en-gb-x-rp', 'en-us', 'de', etc.)
+    """
+    key = (language_code.lower(), region.upper())
+    
+    if key in ESPEAK_VOICE_MAPPING:
+        return ESPEAK_VOICE_MAPPING[key]
+    
+    # Fallback: use language code as espeak voice (works for many languages)
+    # Most single-language codes like 'de', 'fr', 'it' work directly
+    # This handles cases where the language code matches an espeak voice directly
+    return language_code.lower()
+
