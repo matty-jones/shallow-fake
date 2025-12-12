@@ -221,8 +221,14 @@ def find_config_json(checkpoint_path: Path, voice_id: str, workspace_dir: Path) 
     return None
 
 
-def export_onnx(config: VoiceConfig, checkpoint_path: Optional[Path] = None):
-    """Export trained model to ONNX format."""
+def export_onnx(config: VoiceConfig, checkpoint_path: Optional[Path] = None, version: Optional[str] = None):
+    """Export trained model to ONNX format.
+    
+    Args:
+        config: Voice configuration
+        checkpoint_path: Path to checkpoint file. If None, finds best checkpoint.
+        version: Optional version number (e.g., "1", "2"). If provided, adds "-v{version}" suffix.
+    """
     workspace_dir = config.paths.workspace_dir
     output_dir = config.paths.output_models_dir
     ensure_dir(output_dir)
@@ -235,15 +241,29 @@ def export_onnx(config: VoiceConfig, checkpoint_path: Optional[Path] = None):
             raise FileNotFoundError("No checkpoint found")
 
     # Determine output paths using Piper naming convention
-    # Format: <language>_<REGION>-<name>-<quality>
+    # Format: <language>_<REGION>-<name>-<quality>[-v<version>]
     model_name = format_model_name(
         config.language_code,
         config.region,
         config.voice_id,
         config.training.quality
     )
+    
+    # Add version suffix if provided
+    if version:
+        model_name = f"{model_name}-v{version}"
+    
     onnx_path = output_dir / f"{model_name}.onnx"
     json_path = output_dir / f"{model_name}.onnx.json"
+    
+    # Protect v1 from accidental overwrite
+    if version == "1" and onnx_path.exists():
+        logger.warning(f"v1 model already exists at {onnx_path}")
+        logger.warning("v1 is protected from overwrite. Use a different version number or manually rename/remove the existing file.")
+        raise FileExistsError(
+            f"v1 model already exists at {onnx_path}. "
+            "v1 is protected from accidental overwrite. Use a different version number."
+        )
 
     # Ensure training directory exists in workspace (where container will write)
     training_dir = config.paths.training_dir
@@ -324,14 +344,18 @@ if __name__ == "__main__":
     config = VoiceConfig.from_yaml(config_path)
 
     checkpoint_path = None
+    version = None
     args = sys.argv[2:]
     i = 0
     while i < len(args):
         if args[i] == "--checkpoint" and i + 1 < len(args):
             checkpoint_path = Path(args[i + 1])
             i += 2
+        elif args[i] == "--version" and i + 1 < len(args):
+            version = args[i + 1]
+            i += 2
         else:
             i += 1
 
-    export_onnx(config, checkpoint_path)
+    export_onnx(config, checkpoint_path, version)
 

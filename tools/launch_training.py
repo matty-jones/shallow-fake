@@ -44,8 +44,15 @@ def prepare_workspace(config: VoiceConfig):
         logger.info(f"Base checkpoint found: {checkpoint_path}")
 
 
-def launch_training(config: VoiceConfig):
-    """Launch TMS training container."""
+def launch_training(config: VoiceConfig, resume_from_version: Optional[str] = None):
+    """Launch TMS training container.
+    
+    Args:
+        config: Voice configuration
+        resume_from_version: Optional version number (e.g., "1") to resume from a versioned checkpoint.
+                           If provided, loads from workspace/{voice_id}/training/checkpoints/v{version}.ckpt
+                           instead of the base checkpoint.
+    """
     compose_file = config.tms.docker_compose_file
     if not compose_file.exists():
         logger.error(f"Docker compose file not found: {compose_file}")
@@ -54,22 +61,41 @@ def launch_training(config: VoiceConfig):
     # Prepare workspace
     prepare_workspace(config)
 
+    # Determine checkpoint to use
+    if resume_from_version:
+        # Load from versioned checkpoint
+        checkpoint_path = config.paths.training_checkpoints_dir / f"v{resume_from_version}.ckpt"
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Version {resume_from_version} checkpoint not found at {checkpoint_path}. "
+                f"Please save a checkpoint as v{resume_from_version} first using: "
+                f"python tools/save_checkpoint_version.py config/{config.voice_id}.yaml {resume_from_version}"
+            )
+        base_checkpoint_name = f"v{resume_from_version}.ckpt"
+        checkpoint_source = "workspace"  # Indicates it's in workspace, not shared
+        logger.info(f"Resuming training from version {resume_from_version} checkpoint: {checkpoint_path}")
+    else:
+        # Use base checkpoint from config
+        checkpoint_path = config.paths.base_checkpoints_dir / config.training.base_checkpoint
+        base_checkpoint_name = config.training.base_checkpoint
+        checkpoint_source = "shared"  # Indicates it's in shared base_checkpoints
+        if checkpoint_path.exists():
+            logger.info(f"Base checkpoint found: {checkpoint_path}")
+        else:
+            logger.warning(f"Checkpoint not found at {checkpoint_path}; training from scratch.")
+
     # Determine effective max epochs: just use the configured value
     # Since we're doing weights-only loading (not Lightning resume),
     # PyTorch Lightning will start from epoch 0, but the weights are already loaded
     max_epochs = config.training.max_epochs
-    checkpoint_path = config.paths.base_checkpoints_dir / config.training.base_checkpoint
-    if checkpoint_path.exists():
-        logger.info(f"Base checkpoint found: {checkpoint_path}")
-        logger.info(f"Training for {max_epochs} epochs with pre-loaded weights")
-    else:
-        logger.warning(f"Checkpoint not found at {checkpoint_path}; training from scratch.")
+    logger.info(f"Training for {max_epochs} epochs with pre-loaded weights")
 
     # Set environment variables for docker-compose
     env = os.environ.copy()
     env.update({
         "PROJECT_NAME": config.voice_id,  # Use voice_id as project name
-        "BASE_CHECKPOINT": config.training.base_checkpoint,
+        "BASE_CHECKPOINT": base_checkpoint_name,
+        "CHECKPOINT_SOURCE": checkpoint_source,  # "shared" or "workspace"
         "BATCH_SIZE": str(config.training.batch_size),
         "MAX_EPOCHS": str(max_epochs),
         "QUALITY": config.training.quality,

@@ -24,6 +24,7 @@ services:
       # Training configuration (set by launch_training.py)
       - PROJECT_NAME=${PROJECT_NAME}
       - BASE_CHECKPOINT=${BASE_CHECKPOINT}
+      - CHECKPOINT_SOURCE=${CHECKPOINT_SOURCE:-shared}
       - BATCH_SIZE=${BATCH_SIZE}
       - MAX_EPOCHS=${MAX_EPOCHS}
       - QUALITY=${QUALITY}
@@ -52,8 +53,25 @@ services:
         from pytorch_lightning.callbacks import ModelCheckpoint
         from piper_train.vits.lightning import VitsModel
 
+        # Patch torch.load to handle pathlib.PosixPath in checkpoints (PyTorch 2.6+ compatibility)
+        _original_torch_load = torch.load
+        def _patched_torch_load(*args, **kwargs):
+            # If weights_only is not explicitly set, default to False for compatibility
+            if 'weights_only' not in kwargs:
+                kwargs['weights_only'] = False
+            # If weights_only=True is set, add pathlib.PosixPath to safe globals
+            elif kwargs.get('weights_only', False):
+                try:
+                    torch.serialization.add_safe_globals([pathlib.PosixPath])
+                except (AttributeError, TypeError):
+                    # Fallback: use weights_only=False if safe_globals not available
+                    kwargs['weights_only'] = False
+            return _original_torch_load(*args, **kwargs)
+        torch.load = _patched_torch_load
+
         project_name = os.environ.get('PROJECT_NAME', '')
         base_checkpoint = os.environ.get('BASE_CHECKPOINT', '')
+        checkpoint_source = os.environ.get('CHECKPOINT_SOURCE', 'shared')
         quality = os.environ.get('QUALITY', 'high')
         batch_size = int(os.environ.get('BATCH_SIZE', '32'))
         max_epochs = int(os.environ.get('MAX_EPOCHS', '300'))
@@ -61,7 +79,14 @@ services:
         devices = int(os.environ.get('DEVICES', '1'))
 
         dataset_dir = pathlib.Path(f'/workspace/{project_name}/datasets/prepared')
-        ckpt_path = pathlib.Path(f'/shared/base_checkpoints/{base_checkpoint}')
+        
+        # Determine checkpoint path based on source
+        if checkpoint_source == 'workspace':
+            # Load from versioned checkpoint in workspace
+            ckpt_path = pathlib.Path(f'/workspace/{project_name}/training/checkpoints/{base_checkpoint}')
+        else:
+            # Load from shared base checkpoints (default)
+            ckpt_path = pathlib.Path(f'/shared/base_checkpoints/{base_checkpoint}')
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--dataset-dir', required=False)
@@ -121,9 +146,12 @@ services:
 
         if ckpt_path.exists():
             try:
+                # Use patched torch.load which handles pathlib.PosixPath automatically
                 state = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            except TypeError:
-                state = torch.load(ckpt_path, map_location='cpu')
+            except Exception as e:
+                # Final fallback: use weights_only=False
+                print(f'Warning: Could not load with weights_only=True ({e}), falling back to weights_only=False')
+                state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
             if isinstance(state, dict) and 'state_dict' in state:
                 state = state['state_dict']
             missing, unexpected = model.load_state_dict(state, strict=False)

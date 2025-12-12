@@ -39,7 +39,7 @@ synthetic:
 training:
   base_checkpoint: cori-high-500-clean.ckpt
   batch_size: 16
-  max_epochs: 300
+  max_epochs: 700
   quality: high
   accelerator: gpu
   devices: 1

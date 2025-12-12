@@ -204,6 +204,7 @@ def combine(
 @app.command()
 def train(
     config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
+    resume_from_version: str = typer.Option(None, "--resume-from-version", help="Resume training from a versioned checkpoint (e.g., '1')"),
 ):
     """Launch TMS training container."""
     console.print("[bold blue]Launching training...[/bold blue]")
@@ -212,7 +213,7 @@ def train(
     from tools.launch_training import launch_training
 
     try:
-        launch_training(cfg)
+        launch_training(cfg, resume_from_version=resume_from_version)
         console.print("[green]Training container launched![/green]")
         # Show just the filename for monitor command
         config_name = config.name if config.parent.name == "config" else str(config)
@@ -243,9 +244,35 @@ def monitor(
 
 
 @app.command()
+def save_checkpoint(
+    config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
+    version: str = typer.Argument(..., help="Version number (e.g., '1', '2')"),
+    checkpoint: Path = typer.Option(None, "--checkpoint", help="Path to checkpoint file (default: finds best checkpoint)"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing versioned checkpoint (v1 is always protected)"),
+):
+    """Save a checkpoint with a version number for future training resumes."""
+    console.print(f"[bold blue]Saving checkpoint as version {version}...[/bold blue]")
+    cfg = load_config(config)
+
+    from tools.save_checkpoint_version import save_checkpoint_version
+
+    try:
+        save_checkpoint_version(cfg, version, checkpoint, overwrite)
+        console.print(f"[green]Checkpoint saved as v{version}![/green]")
+        console.print(f"Resume training with: [cyan]shallow-fake train --config {config.name if config.parent.name == 'config' else str(config)} --resume-from-version {version}[/cyan]")
+    except FileExistsError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def export(
     config: Path = typer.Option("voice1.yaml", "--config", "-c", help="Config file name (in config/ directory)"),
     checkpoint: Path = typer.Option(None, "--checkpoint", help="Path to checkpoint file"),
+    version: str = typer.Option(None, "--version", help="Version number for the exported model (e.g., '1', '2'). v1 is protected from overwrite."),
 ):
     """Export trained model to ONNX format."""
     console.print("[bold blue]Exporting ONNX model...[/bold blue]")
@@ -254,8 +281,11 @@ def export(
     from tools.export_onnx import export_onnx
 
     try:
-        export_onnx(cfg, checkpoint)
+        export_onnx(cfg, checkpoint, version)
         console.print("[green]ONNX export complete![/green]")
+    except FileExistsError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
