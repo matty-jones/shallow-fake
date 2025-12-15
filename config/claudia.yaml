@@ -25,7 +25,7 @@ synthetic:
     base_url: http://localhost:9010/tts
     voice_id: claudia_clone
   teacher:
-    kind: xtts
+    kind: metavoice
     port: 9010
     model_name: tts_models/multilingual/multi-dataset/xtts_v2
     language: en

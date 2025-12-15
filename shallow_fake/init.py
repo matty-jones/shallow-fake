@@ -32,11 +32,12 @@ def initialize_project(project_name: str, base_dir: Path = None):
     console.print(f"[bold blue]Initializing project: {project_name}[/bold blue]")
 
     # Create new unified directory structure
+    # Note: synth dataset directories are created on-demand based on teacher kind
+    # (synth-xtts or synth-metavoice) when build-synth runs
     directories = [
         base_dir / "input" / project_name / "audio",
         base_dir / "workspace" / project_name / "segments",
         base_dir / "workspace" / project_name / "datasets" / "real" / "wavs",
-        base_dir / "workspace" / project_name / "datasets" / "synth" / "wavs",
         base_dir / "workspace" / project_name / "datasets" / "combined" / "wavs",
         base_dir / "workspace" / project_name / "datasets" / "prepared",
         base_dir / "workspace" / project_name / "training" / "checkpoints",
@@ -105,6 +106,18 @@ def initialize_project(project_name: str, base_dir: Path = None):
                 "num_reference_clips": 3,
                 "workers": 3,
             },
+            # Alternative: Use MetaVoice-1B as teacher model
+            # "teacher": {
+            #     "kind": "metavoice",
+            #     "base_url": "http://localhost:58003",
+            #     "huggingface_repo_id": "metavoiceio/metavoice-1B-v0.1",
+            #     "speaker_ref_path": "/speakers/voice_ref.wav",
+            #     "guidance": 3.0,
+            #     "top_p": 0.95,
+            #     "top_k": 200,
+            #     "port": 58003,
+            #     "reference_audio_dir": f"workspace/{project_name}/datasets/real/wavs",
+            # },
             "max_parallel_jobs": 4,
         },
         "training": {
@@ -138,6 +151,22 @@ def initialize_project(project_name: str, base_dir: Path = None):
             "# This corpus is shared across all projects.\n"
         )
         console.print(f"  Created: {corpus_file}")
+    
+    # Create placeholder evaluation file (shared across all projects)
+    evaluation_file = base_dir / "input" / "shared" / "evaluation.txt"
+    if not evaluation_file.exists():
+        evaluation_file.write_text(
+            "# Add your evaluation phrases here, one per line.\n"
+            "# These phrases will be used to generate audio samples for model evaluation.\n"
+            "# This file is shared across all projects.\n"
+            "# Lines starting with # are ignored.\n"
+            "\n"
+            "# Example phrases:\n"
+            "# This is a test of the voice synthesis system.\n"
+            "# The quick brown fox jumps over the lazy dog.\n"
+            "# Hello, this is my custom voice model speaking.\n"
+        )
+        console.print(f"  Created: {evaluation_file}")
 
     console.print(f"\n[green]Project '{project_name}' initialized successfully![/green]")
     console.print(f"\nNext steps:")

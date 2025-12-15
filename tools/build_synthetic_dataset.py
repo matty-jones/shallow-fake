@@ -13,7 +13,7 @@ import requests
 from faster_whisper import WhisperModel
 from piper_phonemize import phonemize_espeak
 
-from shallow_fake.config import VoiceConfig
+from shallow_fake.config import MetaVoiceTeacherConfig, VoiceConfig, XTTSTeacherConfig
 from shallow_fake.language_utils import convert_language_for_phoneme
 from shallow_fake.utils import ensure_dir, setup_logging
 
@@ -31,20 +31,38 @@ class TTSBackend:
 class HTTPTTSBackend(TTSBackend):
     """HTTP-based TTS backend."""
 
-    def __init__(self, base_url: str, voice_id: str):
+    def __init__(self, base_url: str, voice_id: str, teacher_config=None):
         self.base_url = base_url.rstrip("/")
         self.voice_id = voice_id
+        self.teacher_config = teacher_config
         # Create a session for connection pooling
         self.session = requests.Session()
 
     def generate(self, text: str, output_path: Path) -> bool:
         """Generate audio via HTTP API."""
         try:
-            url = f"{self.base_url}"
-            params = {"text": text, "voice": self.voice_id}
-            # Increased timeout for longer sentences (120 seconds)
-            # Use session for connection pooling
-            response = self.session.post(url, json=params, timeout=120)
+            # Check if this is MetaVoice (uses different API format)
+            if isinstance(self.teacher_config, MetaVoiceTeacherConfig):
+                # MetaVoice API: POST /tts with X-Payload header
+                url = f"{self.base_url}/tts"
+                payload = {
+                    "text": text,
+                    "speaker_ref_path": self.teacher_config.speaker_ref_path,
+                    "guidance": self.teacher_config.guidance,
+                    "top_p": self.teacher_config.top_p,
+                }
+                if self.teacher_config.top_k is not None:
+                    payload["top_k"] = self.teacher_config.top_k
+
+                headers = {"X-Payload": json.dumps(payload)}
+                # MetaVoice expects empty body when using speaker_ref_path
+                response = self.session.post(url, headers=headers, data=b"", timeout=300)
+            else:
+                # XTTS API: POST /tts with JSON body
+                url = f"{self.base_url}"
+                params = {"text": text, "voice": self.voice_id}
+                response = self.session.post(url, json=params, timeout=120)
+
             response.raise_for_status()
 
             # Save audio (assuming response is audio data)
@@ -67,7 +85,8 @@ class HTTPTTSBackend(TTSBackend):
         except requests.exceptions.ConnectionError as e:
             # Connection errors often indicate server crash or overload (e.g., GPU OOM)
             logger.error(f"HTTP TTS connection error for text '{text[:50]}...': {e}")
-            logger.warning("This may indicate server overload or GPU memory exhaustion. Consider reducing workers.")
+            if isinstance(self.teacher_config, XTTSTeacherConfig):
+                logger.warning("This may indicate server overload or GPU memory exhaustion. Consider reducing workers.")
             return False
         except Exception as e:
             logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
@@ -244,7 +263,7 @@ def build_synthetic_dataset(config: VoiceConfig):
         return
 
     corpus_path = config.synthetic.corpus_text_path
-    synth_dataset_dir = config.paths.synth_dataset_dir
+    synth_dataset_dir = config.get_synth_dataset_dir()
     wavs_dir = synth_dataset_dir / "wavs"
     metadata_csv = synth_dataset_dir / "metadata.csv"
 
@@ -257,22 +276,43 @@ def build_synthetic_dataset(config: VoiceConfig):
         return
 
     # Start teacher model service if configured
-    xtts_teacher_started = False
-    if config.synthetic.teacher and config.synthetic.teacher.kind == "xtts":
+    teacher_started = False
+    teacher_kind = None
+    if config.synthetic.teacher:
+        teacher_kind = config.synthetic.teacher.kind
         try:
-            from tools.xtts_teacher_orchestration import start_xtts_teacher, stop_xtts_teacher
+            if teacher_kind == "xtts":
+                from tools.xtts_teacher_orchestration import start_xtts_teacher, stop_xtts_teacher
 
-            logger.info("Starting teacher model service...")
-            teacher_config = config.synthetic.teacher
-            if teacher_config:
-                num_clips = teacher_config.num_reference_clips
-                if num_clips == 0:
-                    logger.info(f"Teacher model configured to use ALL available reference audio files")
-                else:
-                    logger.info(f"Teacher model configured to use {num_clips} reference audio files per request")
-            start_xtts_teacher(config)
-            xtts_teacher_started = True
-            logger.info("Teacher model service started successfully")
+                logger.info("Starting XTTS teacher model service...")
+                teacher_config = config.synthetic.teacher
+                if isinstance(teacher_config, XTTSTeacherConfig):
+                    num_clips = teacher_config.num_reference_clips
+                    if num_clips == 0:
+                        logger.info(f"XTTS teacher configured to use ALL available reference audio files")
+                    else:
+                        logger.info(f"XTTS teacher configured to use {num_clips} reference audio files per request")
+                start_xtts_teacher(config)
+                teacher_started = True
+                logger.info("XTTS teacher model service started successfully")
+            elif teacher_kind == "metavoice":
+                from tools.metavoice_teacher_orchestration import (
+                    start_metavoice_teacher,
+                    stop_metavoice_teacher,
+                )
+
+                logger.info("Starting MetaVoice teacher model service...")
+                teacher_config = config.synthetic.teacher
+                if isinstance(teacher_config, MetaVoiceTeacherConfig):
+                    logger.info(
+                        f"MetaVoice config: guidance={teacher_config.guidance}, "
+                        f"top_p={teacher_config.top_p}, top_k={teacher_config.top_k}"
+                    )
+                start_metavoice_teacher(config)
+                teacher_started = True
+                logger.info("MetaVoice teacher model service started successfully")
+            else:
+                raise ValueError(f"Unsupported teacher kind: {teacher_kind}")
         except Exception as e:
             logger.error(f"Failed to start teacher model service: {e}")
             logger.error("Synthetic dataset generation aborted")
@@ -284,6 +324,7 @@ def build_synthetic_dataset(config: VoiceConfig):
             tts_backend = HTTPTTSBackend(
                 config.synthetic.tts_http.base_url,
                 config.synthetic.tts_http.voice_id,
+                teacher_config=config.synthetic.teacher,
             )
         else:
             logger.error(f"Unsupported TTS backend: {config.synthetic.tts_backend}")
@@ -294,7 +335,13 @@ def build_synthetic_dataset(config: VoiceConfig):
         valid_entries = []
         max_workers = config.synthetic.max_parallel_jobs
         if config.synthetic.teacher:
-            logger.info(f"Using {max_workers} parallel jobs (auto-calculated as {config.synthetic.teacher.workers} workers * 2 to keep workers busy)")
+            if isinstance(config.synthetic.teacher, XTTSTeacherConfig):
+                logger.info(
+                    f"Using {max_workers} parallel jobs "
+                    f"(auto-calculated as {config.synthetic.teacher.workers} workers * 2 to keep workers busy)"
+                )
+            else:
+                logger.info(f"Using {max_workers} parallel jobs")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -335,18 +382,22 @@ def build_synthetic_dataset(config: VoiceConfig):
 
     finally:
         # Stop teacher model service if we started it
-        if xtts_teacher_started:
+        if teacher_started:
             try:
-                from tools.xtts_teacher_orchestration import stop_xtts_teacher
                 import subprocess
 
                 # Check container logs before stopping if there were errors
                 if len(valid_entries) == 0 and sentences:
                     logger.warning("No valid entries generated. Checking container logs...")
+                    container_name = (
+                        f"{config.voice_id}_xtts_teacher"
+                        if teacher_kind == "xtts"
+                        else f"{config.voice_id}_metavoice_teacher"
+                    )
                     try:
                         # Try to get logs from running or stopped container
                         result = subprocess.run(
-                            ["docker", "logs", f"{config.voice_id}_xtts_teacher"],
+                            ["docker", "logs", container_name],
                             capture_output=True,
                             text=True,
                             timeout=10,
@@ -368,7 +419,15 @@ def build_synthetic_dataset(config: VoiceConfig):
                         # Try alternative: check if container exists and get status
                         try:
                             status_result = subprocess.run(
-                                ["docker", "ps", "-a", "--filter", f"name={config.voice_id}_xtts_teacher", "--format", "{{.Status}}"],
+                                [
+                                    "docker",
+                                    "ps",
+                                    "-a",
+                                    "--filter",
+                                    f"name={container_name}",
+                                    "--format",
+                                    "{{.Status}}",
+                                ],
                                 capture_output=True,
                                 text=True,
                                 timeout=5,
@@ -379,7 +438,14 @@ def build_synthetic_dataset(config: VoiceConfig):
                             pass
 
                 logger.info("Stopping teacher model service...")
-                stop_xtts_teacher(config)
+                if teacher_kind == "xtts":
+                    from tools.xtts_teacher_orchestration import stop_xtts_teacher
+
+                    stop_xtts_teacher(config)
+                elif teacher_kind == "metavoice":
+                    from tools.metavoice_teacher_orchestration import stop_metavoice_teacher
+
+                    stop_metavoice_teacher(config)
                 logger.info("Teacher model service stopped")
             except Exception as e:
                 logger.warning(f"Error stopping teacher model service: {e}")

@@ -1,0 +1,47 @@
+services:
+  metavoice-teacher:
+    # Build from MetaVoice source if third_party/metavoice-src exists
+    # Otherwise, you can use a pre-built image or set up the submodule
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.metavoice
+      # Alternative: use a pre-built image by uncommenting below and commenting out build section
+      # image: metavoice/metavoice-1b:latest
+    container_name: "${VOICE_ID:-voice1}_metavoice_teacher"
+    restart: unless-stopped
+
+    # GPU passthrough configuration using CDI
+    devices:
+      - "nvidia.com/gpu=all"
+
+    environment:
+      VOICE_ID: "${VOICE_ID:-voice1}"
+      METAVOICE_REPO_ID: "${METAVOICE_REPO_ID:-metavoiceio/metavoice-1B-v0.1}"
+      METAVOICE_PORT: "${METAVOICE_PORT:-58003}"
+      SPEAKER_REF_PATH: "${SPEAKER_REF_PATH:-/speakers/voice_ref.wav}"
+      # CDI GPU passthrough environment variables
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      # PyTorch memory optimization
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+    # Mount reference audio file into container
+    volumes:
+      - "${REFERENCE_AUDIO_PATH}:/speakers/voice_ref.wav:ro"
+
+    ports:
+      - "${METAVOICE_PORT:-58003}:58003"
+
+    # Launch the MetaVoice inference server
+    # The Dockerfile should set up the environment and expose the FastAPI server
+    command:
+      - bash
+      - -c
+      - |
+        export PYTHONUNBUFFERED=1
+        cd /opt/metavoice
+        python serving.py \
+          --huggingface_repo_id=$${METAVOICE_REPO_ID} \
+          --port=$${METAVOICE_PORT} \
+          --host=0.0.0.0
+

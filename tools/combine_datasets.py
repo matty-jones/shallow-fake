@@ -19,7 +19,7 @@ def combine_datasets(config: VoiceConfig, subsample_synth: Optional[float] = Non
         subsample_synth: If provided, subsample synthetic data by this ratio (0.0-1.0)
     """
     real_dir = config.paths.real_dataset_dir
-    synth_dir = config.paths.synth_dataset_dir
+    synth_dir = config.get_synth_dataset_dir()
     combined_dir = config.paths.combined_dataset_dir
     combined_wavs_dir = combined_dir / "wavs"
     combined_metadata = combined_dir / "metadata.csv"

@@ -168,9 +168,15 @@ def build_synth(
     if cpu:
         console.print("[yellow]Using CPU mode for verification[/yellow]")
 
-    # Check if teacher model is configured
-    if cfg.synthetic.teacher and cfg.synthetic.teacher.kind == "xtts":
-        console.print("[cyan]Teacher model service will be started automatically[/cyan]")
+    # Check if teacher model is configured and log which type
+    if cfg.synthetic.teacher:
+        teacher_kind = cfg.synthetic.teacher.kind
+        if teacher_kind == "xtts":
+            console.print("[cyan]XTTS teacher model service will be started automatically[/cyan]")
+        elif teacher_kind == "metavoice":
+            console.print("[cyan]MetaVoice teacher model service will be started automatically[/cyan]")
+        else:
+            console.print(f"[yellow]Unknown teacher model type: {teacher_kind}[/yellow]")
 
     from tools.build_synthetic_dataset import build_synthetic_dataset
 

@@ -10,14 +10,40 @@ from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
 
-# Default evaluation phrases
-DEFAULT_PHRASES = [
-    "This is a test of the voice synthesis system.",
-    "The quick brown fox jumps over the lazy dog.",
-    "Hello, this is my custom voice model speaking.",
-    "I can generate natural sounding speech from text.",
-    "This voice was trained using the ShallowFaker pipeline.",
-]
+
+def load_evaluation_phrases(evaluation_path: Path) -> List[str]:
+    """Load evaluation phrases from file, one per line."""
+    if not evaluation_path.exists():
+        logger.warning(f"Evaluation file not found: {evaluation_path}")
+        logger.warning("Using default phrases. Create the file to customize evaluation phrases.")
+        # Fallback to default phrases if file doesn't exist
+        return [
+            "This is a test of the voice synthesis system.",
+            "The quick brown fox jumps over the lazy dog.",
+            "Hello, this is my custom voice model speaking.",
+            "I can generate natural sounding speech from text.",
+            "This voice was trained using the ShallowFaker pipeline.",
+        ]
+    
+    phrases = []
+    with open(evaluation_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                phrases.append(line)
+    
+    if not phrases:
+        logger.warning(f"No phrases found in {evaluation_path}")
+        return [
+            "This is a test of the voice synthesis system.",
+            "The quick brown fox jumps over the lazy dog.",
+            "Hello, this is my custom voice model speaking.",
+            "I can generate natural sounding speech from text.",
+            "This voice was trained using the ShallowFaker pipeline.",
+        ]
+    
+    logger.info(f"Loaded {len(phrases)} evaluation phrases from {evaluation_path}")
+    return phrases
 
 
 def generate_samples(
@@ -76,7 +102,9 @@ def generate_samples(
 def eval_model(config: VoiceConfig, phrases: List[str] = None, model_name: str = None):
     """Evaluate exported model."""
     if phrases is None:
-        phrases = DEFAULT_PHRASES
+        # Load from input/shared/evaluation.txt
+        evaluation_path = config.paths.corpus_path.parent / "evaluation.txt"
+        phrases = load_evaluation_phrases(evaluation_path)
 
     if model_name is None:
         # Use Piper naming convention: <language>_<REGION>-<name>-<quality>
@@ -89,7 +117,16 @@ def eval_model(config: VoiceConfig, phrases: List[str] = None, model_name: str =
 
     model_path = config.paths.output_models_dir / f"{model_name}.onnx"
     json_path = config.paths.output_models_dir / f"{model_name}.onnx.json"
-    output_dir = config.paths.output_models_dir.parent / "samples" / config.voice_id
+    
+    # Extract version from model name if present (e.g., "en_GB-claudia-high-v1" -> "v1")
+    # This allows separate output directories for different versions
+    import re
+    version_match = re.search(r'-v(\d+)$', model_name)
+    if version_match:
+        version = version_match.group(1)
+        output_dir = config.paths.output_models_dir.parent / "samples" / f"{config.voice_id}-v{version}"
+    else:
+        output_dir = config.paths.output_models_dir.parent / "samples" / config.voice_id
 
     generate_samples(model_path, json_path, phrases, output_dir)
 

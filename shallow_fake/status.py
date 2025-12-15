@@ -136,8 +136,9 @@ def check_stage_status(config: VoiceConfig) -> Dict[str, Tuple[bool, str]]:
     )
     
     # Stage 5: Build Synthetic (verification is now in-place)
-    synth_metadata = config.paths.synth_dataset_dir / "metadata.csv"
-    synth_wavs = config.paths.synth_dataset_dir / "wavs"
+    synth_dataset_dir = config.get_synth_dataset_dir()
+    synth_metadata = synth_dataset_dir / "metadata.csv"
+    synth_wavs = synth_dataset_dir / "wavs"
     has_synth = synth_metadata.exists() and synth_wavs.exists()
     synth_count = len(list(synth_wavs.glob("*.wav"))) if synth_wavs.exists() else 0
     status["build-synth"] = (

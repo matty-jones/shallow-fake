@@ -1,0 +1,168 @@
+# Use NVIDIA CUDA base image with Python (no pre-installed PyTorch)
+# This avoids conflicts with conda-installed PyTorch packages
+# CUDA 12.1 runtime with cuDNN 8 for GPU support
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# Install Python 3.10 and system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.10 \
+        python3.10-dev \
+        python3-pip \
+        ffmpeg \
+        git \
+        git-lfs \
+        curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python3
+
+# Upgrade pip first
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Where MetaVoice will live inside the container
+WORKDIR /opt/metavoice
+
+# -----------------------------------------------------------------------------
+# Clone MetaVoice source from GitHub
+# If you have it as a git submodule at third_party/metavoice-src/, you can
+# uncomment the COPY line below and comment out the git clone instead.
+# -----------------------------------------------------------------------------
+# Option 1: Clone from GitHub (default)
+RUN git clone --depth 1 https://github.com/metavoiceio/metavoice-src.git . && \
+    git lfs pull
+
+# Option 2: Copy from local submodule (uncomment if you have third_party/metavoice-src/)
+# COPY third_party/metavoice-src/ ./
+
+# Patch serving.py to handle PyTorch 2.6+ weights_only default
+# PyTorch 2.6 changed torch.load default to weights_only=True, which breaks MetaVoice checkpoint loading
+RUN python3 << 'EOF'
+import re
+
+# Read the file
+with open('serving.py', 'r') as f:
+    content = f.read()
+
+# Find the import logging line and add the patch after it
+patch = '''# Patch torch.load for PyTorch 2.6+ compatibility
+# PyTorch 2.6 changed default weights_only=True, which breaks MetaVoice checkpoint loading
+try:
+    import torch
+    _original_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+except ImportError:
+    pass  # torch not available yet
+
+'''
+
+# Insert patch after "import logging"
+content = content.replace('import logging', f'import logging\n{patch}', 1)
+
+# Write back
+with open('serving.py', 'w') as f:
+    f.write(content)
+EOF
+
+# Install nightly PyTorch stack FIRST to establish the base
+# Using nightly cu128 for RTX 5080 (sm_120) support
+# This ensures torchvision will be compatible with the PyTorch version
+# No need to remove existing PyTorch since we're using a clean base image
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/nightly/cu128 \
+        torch torchvision torchaudio && \
+    python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'PyTorch location: {torch.__file__}'); assert not torch.__file__.startswith('/opt/conda'), f'PyTorch should not be from conda: {torch.__file__}'"
+
+# Install MetaVoice dependencies and the package itself using pip
+# Check for requirements.txt first, then install the package in editable mode
+# Strip hash lines from requirements.txt to avoid hash checking issues
+# Also remove torch/torchvision/torchaudio from requirements to avoid conflicts
+# We've already installed these from the nightly index above
+RUN if [ -f "requirements.txt" ]; then \
+        sed 's/ --hash=.*//' requirements.txt > requirements_no_hashes.txt && \
+        grep -vE '^(torch|torchvision|torchaudio)' requirements_no_hashes.txt > requirements_filtered.txt || true && \
+        pip install --no-cache-dir -r requirements_filtered.txt; \
+    fi
+
+# Install MetaVoice package in editable mode (this might install torch as a dependency)
+# We'll reinstall nightly PyTorch after to ensure correct versions
+RUN pip install --no-cache-dir -e .
+
+# Uninstall any PyTorch packages that might have been installed by MetaVoice dependencies
+# Then reinstall nightly PyTorch stack to ensure RTX 5080 compatibility
+RUN pip uninstall -y torch torchvision torchaudio || true && \
+    pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/nightly/cu128 \
+        torch torchvision torchaudio && \
+    python -c "import torch; print(f'Final PyTorch version: {torch.__version__}'); print(f'Final PyTorch location: {torch.__file__}'); assert 'cu128' in torch.__version__ or 'dev' in torch.__version__, f'Expected nightly PyTorch (cu128 or dev), got {torch.__version__}'"
+
+# Create compatibility shim for torchaudio.backend (nightly torchaudio doesn't have this module)
+# The df (deepfilternet) package expects torchaudio.backend.common.AudioMetaData
+RUN python3 << 'EOF'
+import torchaudio
+import os
+from pathlib import Path
+
+# Get torchaudio package directory
+torchaudio_dir = Path(torchaudio.__file__).parent
+
+# Create backend directory
+backend_dir = torchaudio_dir / "backend"
+backend_dir.mkdir(exist_ok=True)
+
+# Create __init__.py for backend module
+(backend_dir / "__init__.py").write_text("""# Compatibility shim for nightly torchaudio
+from .common import AudioMetaData
+__all__ = ["AudioMetaData"]
+""")
+
+# Create common.py with AudioMetaData shim
+# AudioMetaData is typically a dataclass with fields like sample_rate, num_frames, num_channels
+# We'll create a minimal shim that provides the expected interface
+(backend_dir / "common.py").write_text("""# Compatibility shim for torchaudio.backend.common.AudioMetaData
+# Nightly torchaudio doesn't have this module, so we provide a minimal shim
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class AudioMetaData:
+    \"\"\"Compatibility shim for AudioMetaData expected by df package.\"\"\"
+    sample_rate: int
+    num_frames: int
+    num_channels: int
+    bits_per_sample: Optional[int] = None
+    encoding: Optional[str] = None
+
+__all__ = ["AudioMetaData"]
+""")
+
+print(f"Created torchaudio.backend compatibility shim at {backend_dir}")
+EOF
+
+# Optional: keep HF cache somewhere persistent-ish inside the container
+ENV HUGGINGFACE_HUB_CACHE=/opt/.cache/huggingface \
+    PYTHONPATH=/opt/metavoice
+
+# Expose the MetaVoice server port (default 58003, configurable via env)
+EXPOSE 58003
+
+# -----------------------------------------------------------------------------
+# Start the MetaVoice-1B server
+#
+# The server will be started via docker-compose command to allow
+# environment variable configuration (huggingface_repo_id, port, etc.)
+# The default CMD is overridden by docker-compose.yml
+# -----------------------------------------------------------------------------
+# Default command (overridden by docker-compose)
+CMD ["python", "serving.py", \
+     "--huggingface_repo_id=metavoiceio/metavoice-1B-v0.1", \
+     "--host=0.0.0.0", \
+     "--port=58003"]

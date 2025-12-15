@@ -1,10 +1,10 @@
 """Configuration management with Pydantic validation."""
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Discriminator, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -33,10 +33,22 @@ class PathsConfig(BaseModel):
         """Real dataset directory."""
         return self.workspace_dir / "datasets" / "real"
 
-    @property
-    def synth_dataset_dir(self) -> Path:
-        """Synthetic dataset directory."""
-        return self.workspace_dir / "datasets" / "synth"
+    def synth_dataset_dir(self, teacher_kind: Optional[str] = None) -> Path:
+        """
+        Synthetic dataset directory.
+        
+        Args:
+            teacher_kind: Teacher model kind ('xtts' or 'metavoice'). 
+                         If None, defaults to 'synth' for backward compatibility.
+        
+        Returns:
+            Path to synthetic dataset directory (synth-<teacher_kind> or synth if teacher_kind is None)
+        """
+        if teacher_kind:
+            return self.workspace_dir / "datasets" / f"synth-{teacher_kind}"
+        else:
+            # Backward compatibility: return 'synth' if teacher_kind not specified
+            return self.workspace_dir / "datasets" / "synth"
 
     @property
     def combined_dataset_dir(self) -> Path:
@@ -100,8 +112,8 @@ class TTSHTTPConfig(BaseModel):
     voice_id: str
 
 
-class TeacherConfig(BaseModel):
-    """Teacher model service configuration."""
+class XTTSTeacherConfig(BaseModel):
+    """XTTS teacher model service configuration."""
 
     kind: Literal["xtts"] = Field(default="xtts")
     port: int = Field(default=9010, ge=1024, le=65535)
@@ -121,6 +133,36 @@ class TeacherConfig(BaseModel):
         return v
 
 
+class MetaVoiceTeacherConfig(BaseModel):
+    """MetaVoice teacher model service configuration."""
+
+    kind: Literal["metavoice"] = Field(default="metavoice")
+    base_url: str = Field(default="http://localhost:58003", description="Base URL for MetaVoice HTTP server")
+    huggingface_repo_id: str = Field(default="metavoiceio/metavoice-1B-v0.1", description="HuggingFace repository ID for MetaVoice model")
+    speaker_ref_path: str = Field(default="/speakers/voice_ref.wav", description="Path inside container to reference audio file")
+    guidance: float = Field(default=3.0, ge=0.0, description="Guidance scale for MetaVoice generation")
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0, description="Top-p sampling parameter")
+    top_k: Optional[int] = Field(default=200, ge=1, description="Top-k sampling parameter")
+    port: int = Field(default=58003, ge=1024, le=65535, description="Port for MetaVoice HTTP server")
+    reference_audio_dir: Path = Field(description="Directory containing reference audio files (used to select best clip)")
+
+    @field_validator("reference_audio_dir", mode="before")
+    @classmethod
+    def convert_reference_audio_dir(cls, v):
+        """Convert reference_audio_dir to Path object."""
+        if isinstance(v, str):
+            return Path(v)
+        return v
+
+
+# Union type for teacher configs with discriminated union
+# Pydantic will use the "kind" field to determine which config type to use
+TeacherConfig = Annotated[
+    Union[XTTSTeacherConfig, MetaVoiceTeacherConfig],
+    Discriminator("kind"),
+]
+
+
 class SyntheticConfig(BaseModel):
     """Synthetic data expansion configuration."""
 
@@ -137,9 +179,17 @@ class SyntheticConfig(BaseModel):
         """Auto-calculate max_parallel_jobs if not specified."""
         if self.max_parallel_jobs is not None:
             return self
-        # Auto-calculate based on teacher workers
-        if self.teacher and hasattr(self.teacher, "workers"):
-            self.max_parallel_jobs = self.teacher.workers * 2
+        # Auto-calculate based on teacher type
+        if self.teacher:
+            if isinstance(self.teacher, XTTSTeacherConfig):
+                # XTTS: use workers * 2 to keep workers busy
+                self.max_parallel_jobs = self.teacher.workers * 2
+            elif isinstance(self.teacher, MetaVoiceTeacherConfig):
+                # MetaVoice: default to 4 parallel jobs (MetaVoice doesn't have workers config)
+                self.max_parallel_jobs = 4
+            else:
+                # Fallback for unknown teacher types
+                self.max_parallel_jobs = 4
         else:
             # Default fallback if no teacher configured
             self.max_parallel_jobs = 4
@@ -180,6 +230,21 @@ class VoiceConfig(BaseModel):
     synthetic: SyntheticConfig
     training: TrainingConfig
     tms: TMSConfig
+
+    def get_synth_dataset_dir(self) -> Path:
+        """
+        Get synthetic dataset directory based on configured teacher kind.
+        
+        Returns:
+            Path to teacher-kind-specific synthetic dataset directory (synth-xtts or synth-metavoice)
+            Falls back to 'synth' if no teacher is configured.
+        """
+        if self.synthetic.teacher:
+            teacher_kind = self.synthetic.teacher.kind
+            return self.paths.synth_dataset_dir(teacher_kind=teacher_kind)
+        else:
+            # No teacher configured, use default 'synth' directory
+            return self.paths.synth_dataset_dir(teacher_kind=None)
 
     @field_validator("paths", mode="before")
     @classmethod
@@ -245,6 +310,10 @@ class VoiceConfig(BaseModel):
             teacher = data["synthetic"]["teacher"]
             if "reference_audio_dir" in teacher and isinstance(teacher["reference_audio_dir"], str):
                 teacher["reference_audio_dir"] = str(project_root / teacher["reference_audio_dir"])
+            # Handle MetaVoice base_url default if not set
+            if teacher.get("kind") == "metavoice" and "base_url" not in teacher:
+                port = teacher.get("port", 58003)
+                teacher["base_url"] = f"http://localhost:{port}"
 
         if "tms" in data and "docker_compose_file" in data["tms"]:
             compose_path = data["tms"]["docker_compose_file"]
@@ -319,7 +388,8 @@ class VoiceConfig(BaseModel):
             self.paths.shared_models_dir,
             self.paths.segments_dir,
             self.paths.real_dataset_dir,
-            self.paths.synth_dataset_dir,
+            # synth_dataset_dir is teacher-kind-specific and created on-demand
+            # when build-synth runs, so we don't create it here
             self.paths.combined_dataset_dir,
             self.paths.prepared_dataset_dir,
             self.paths.training_dir,
@@ -340,7 +410,8 @@ class VoiceConfig(BaseModel):
 
         # Create dataset subdirectories
         (self.paths.real_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
-        (self.paths.synth_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
+        # Synth dataset directory is created on-demand based on teacher kind
+        # when build-synth runs, so we don't create it here
         (self.paths.combined_dataset_dir / "wavs").mkdir(parents=True, exist_ok=True)
         
         # Ensure corpus directory exists
