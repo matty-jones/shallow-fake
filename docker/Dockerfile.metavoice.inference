@@ -1,0 +1,146 @@
+# syntax=docker/dockerfile:1.6
+# MetaVoice teacher model (RTX 5080 / PyTorch nightly cu128)
+#
+# Based on YOUR original Dockerfile.metavoice.inference with minimal fixes:
+#   1) Remove the bogus typing_extensions==4.11.0a1 (it doesn't exist)
+#   2) Ensure typing_extensions is new enough to provide TypeIs (torch nightly needs it)
+#   3) Do NOT apply --no-deps to everything; only use it for audiocraft (to avoid torch downgrade)
+#   4) Keep your metavoice-src clone + serving.py patch flow intact
+
+# --- Stage 1: CUDA + Python ---------------------------------------------------
+# Use devel image for build stage (has CUDA headers), runtime for final
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS base
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=${CUDA_HOME}/bin:${PATH} \
+    LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH} \
+    CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CPLUS_INCLUDE_PATH} \
+    C_INCLUDE_PATH=${CUDA_HOME}/include:${C_INCLUDE_PATH}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.10 python3.10-dev python3-pip \
+        ffmpeg git git-lfs curl ca-certificates && \
+    ln -sf /usr/bin/python3.10 /usr/bin/python && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# --- Stage 2: Python deps -----------------------------------------------------
+FROM base AS deps
+# build-time libs for PyAV (used by AudioCraft) and C++ compiler for xFormers
+# CUDA headers are already in devel image
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        build-essential \
+        g++ \
+        cmake \
+        libavdevice-dev libavformat-dev libavfilter-dev \
+        libavcodec-dev  libavutil-dev  \
+        libswresample-dev libswscale-dev \
+        libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# 5080 requires sm_120 → use nightly cu128 wheels
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+        torch==2.10.0.dev20251213+cu128 \
+        torchvision==0.25.0.dev20251213+cu128 \
+        torchaudio==2.10.0.dev20251213+cu128
+
+# Fix: torch nightlies import TypeIs from typing_extensions (needs >=4.12.0).
+# Your log showed typing_extensions in the container was too old.
+RUN pip install --no-cache-dir typing_extensions==4.15.0
+
+# Your runtime deps (install with deps enabled)
+RUN pip install --no-cache-dir \
+        transformers==4.37.0 \
+        soundfile==0.12.1 \
+        sentencepiece==0.1.99 \
+        accelerate==0.27.2 \
+        fastapi \
+        uvicorn[standard] \
+        tyro \
+        attrs==23.2.0 \
+        librosa \
+        julius \
+        av \
+        omegaconf \
+        einops \
+        ninja \
+        flashy \
+        num2words \
+        spacy \
+        lightning_utilities \
+        tiktoken \
+        deepfilternet \
+        pydub \
+        posthog \
+        python-multipart
+
+# AudioCraft: install without letting it “helpfully” pin torch==2.1.0.
+RUN pip install --no-cache-dir --no-deps \
+        git+https://github.com/facebookresearch/audiocraft.git@main
+
+
+# These have to be done after audiocraft and torch, otherwise they will be downgraded
+RUN pip install --no-cache-dir --no-deps \
+        torchdiffeq \
+        torchmetrics
+
+# Install xformers with patch to bypass PyTorch version check for dev versions
+# xFormers rejects PyTorch dev versions, so we just comment out the entire if block
+
+ENV CUDA_HOME=/usr/local/cuda \
+    CUDA_PATH=/usr/local/cuda \
+    CUDACXX=/usr/local/cuda/bin/nvcc \
+    CPATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include \
+    C_INCLUDE_PATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include \
+    CPLUS_INCLUDE_PATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include
+
+RUN git clone --depth 1 https://github.com/facebookresearch/xformers.git /tmp/xformers && \
+    cd /tmp/xformers && \
+    git submodule update --init --recursive && \
+    sed -i '/if torch\.__version__ < "2\.10":/,/^[[:space:]]*)$/s/^[[:space:]]*/        # /' setup.py && \
+    USE_CUDA=1 TORCH_CUDA_ARCH_LIST=12.0 \
+    pip install -v --no-build-isolation -U . && \
+    rm -rf /tmp/xformers
+
+# Sanity check at build-time: use getattr to safely check version (handles cases where __version__ may not be exposed)
+RUN python -c "import typing_extensions as te; from typing_extensions import TypeIs; import torch; version = getattr(te, '__version__', 'unknown'); print('typing_extensions', version, 'torch', torch.__version__)"
+
+# torchaudio nightly no longer ships `torchaudio.backend`;
+# keep your original shim (NO line-continuation backslashes here; heredocs are picky)
+RUN python - <<'PY'
+import pathlib, textwrap, importlib.util
+ta = importlib.util.find_spec("torchaudio").submodule_search_locations[0]
+backend = pathlib.Path(ta) / "backend"
+backend.mkdir(exist_ok=True)
+(backend/"__init__.py").write_text("from .common import AudioMetaData\n")
+(backend/"common.py").write_text(textwrap.dedent('''
+    class AudioMetaData:
+        def __init__(self,*a,**kw): pass
+'''))
+PY
+
+# --- Stage 3: Application -----------------------------------------------------
+FROM deps AS app
+WORKDIR /opt/metavoice
+RUN git clone --depth 1 https://github.com/metavoiceio/metavoice-src.git . && \
+    git lfs pull
+
+# Patch torch.load default (PyTorch 2.6+)
+RUN sed -i "1i\
+import torch, builtins\n\
+_load=torch.load\n\
+def _pl(*a, **kw):\n\
+    kw.setdefault('weights_only', False)\n\
+    return _load(*a, **kw)\n\
+torch.load=_pl\n" serving.py
+
+# Fix bug in serving.py: change 'from attr[s] import dataclass' to Python's built-in 'from dataclasses import dataclass'
+RUN sed -i -e 's/from attr import dataclass/from dataclasses import dataclass/' -e 's/from attrs import dataclass/from dataclasses import dataclass/' serving.py
+
+EXPOSE 58003
+CMD [ "python", "serving.py", "--port=58003" ]
