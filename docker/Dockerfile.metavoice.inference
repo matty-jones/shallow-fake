@@ -142,5 +142,60 @@ torch.load=_pl\n" serving.py
 # Fix bug in serving.py: change 'from attr[s] import dataclass' to Python's built-in 'from dataclasses import dataclass'
 RUN sed -i -e 's/from attr import dataclass/from dataclasses import dataclass/' -e 's/from attrs import dataclass/from dataclasses import dataclass/' serving.py
 
+# Fix dtype mismatch in fast_model.py: ensure query tensor matches key/value dtype (float16)
+# The error shows query is float32 but key/value are float16, causing scaled_dot_product_attention to fail
+RUN sed -i 's/y = F\.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0\.0)/y = F.scaled_dot_product_attention(q.to(k.dtype), k, v, attn_mask=mask, dropout_p=0.0)/' fam/llm/fast_model.py
+
+# Fix dtype mismatch: ensure model is converted to float16 to avoid bfloat16/float16 mix
+# The error occurs INSIDE build_model during generate() call, so we need to convert BEFORE that
+# Patch fast_inference_utils.py to convert model to float16 inside build_model before generate()
+RUN python <<'PY'
+with open('fam/llm/fast_inference_utils.py', 'r') as f:
+    lines = f.readlines()
+
+# Find the generate() call in build_model and insert model conversion before it
+inserted = False
+for i, line in enumerate(lines):
+    if not inserted and 'def build_model' in line:
+        # We're in build_model function, look for the generate() call
+        # The error shows it's at line 375, so look for 'y = generate(' or similar
+        for j in range(i, min(i + 400, len(lines))):
+            if 'generate(' in lines[j] and ('y =' in lines[j] or '=' in lines[j]):
+                # Found the generate call, insert model conversion before it
+                # Look backwards to find where model is available (after load_state_dict or model creation)
+                # Insert right before the generate line
+                indent = len(lines[j]) - len(lines[j].lstrip())
+                lines.insert(j, ' ' * indent + '# Convert model to float16 to avoid bfloat16/float16 dtype mismatches\n')
+                lines.insert(j + 1, ' ' * indent + 'model = model.half()\n')
+                inserted = True
+                break
+        if inserted:
+            break
+
+# If we didn't find generate, try to find load_state_dict and insert after that
+if not inserted:
+    for i, line in enumerate(lines):
+        if 'load_state_dict' in line and 'model' in line:
+            # Found model loading, insert conversion after this statement completes
+            # Look for the next non-empty line at same or less indentation
+            base_indent = len(line) - len(line.lstrip())
+            for j in range(i + 1, min(i + 10, len(lines))):
+                next_line = lines[j]
+                if next_line.strip() and not next_line.strip().startswith('#'):
+                    next_indent = len(next_line) - len(next_line.lstrip())
+                    if next_indent <= base_indent:
+                        # Insert before this line
+                        indent = base_indent
+                        lines.insert(j, ' ' * indent + '# Convert model to float16 to avoid bfloat16/float16 dtype mismatches\n')
+                        lines.insert(j + 1, ' ' * indent + 'model = model.half()\n')
+                        inserted = True
+                        break
+            if inserted:
+                break
+
+with open('fam/llm/fast_inference_utils.py', 'w') as f:
+    f.writelines(lines)
+PY
+
 EXPOSE 58003
 CMD [ "python", "serving.py", "--port=58003" ]
