@@ -128,6 +128,118 @@ def select_best_reference_clip(
     return output_path
 
 
+def concatenate_reference_audio(
+    reference_dir: Path,
+    output_path: Path,
+    gap_duration: float = 1.0,
+) -> Path:
+    """
+    Concatenate all reference audio files into a single file with gaps between them.
+    
+    This is used for MetaVoice which requires a single reference audio file that is
+    at least 30 seconds long. All WAV files in the directory are concatenated with
+    a 1-second silence gap between each file.
+    
+    Args:
+        reference_dir: Directory containing reference WAV files
+        output_path: Path where concatenated audio should be saved
+        gap_duration: Duration of silence gap between files in seconds (default: 1.0)
+    
+    Returns:
+        Path to the concatenated reference audio file
+    
+    Raises:
+        ValueError: If no valid WAV files are found in reference_dir
+    """
+    if not reference_dir.exists():
+        raise ValueError(f"Reference audio directory does not exist: {reference_dir}")
+    
+    wav_files = sorted(reference_dir.glob("*.wav"))
+    if not wav_files:
+        raise ValueError(f"No WAV files found in reference directory: {reference_dir}")
+    
+    logger.info(f"Concatenating {len(wav_files)} reference audio files with {gap_duration}s gaps...")
+    
+    # Ensure output directory exists
+    ensure_dir(output_path.parent)
+    
+    # Use ffmpeg filter_complex to concatenate with silence gaps
+    # Strategy: Detect sample rate, then use apad to add silence padding after each file (except last)
+    inputs = []
+    
+    # Get sample rate from first file (needed to calculate padding in samples)
+    try:
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=sample_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(wav_files[0].resolve()),
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+        sample_rate = int(float(probe_result.stdout.strip()))
+        logger.debug(f"Detected sample rate: {sample_rate} Hz")
+    except Exception:
+        sample_rate = 22050  # Fallback to common TTS sample rate
+        logger.warning(f"Could not detect sample rate, using default {sample_rate} Hz")
+    
+    # Calculate padding length in samples
+    pad_len_samples = int(sample_rate * gap_duration)
+    
+    # Build inputs and filters
+    for i, wav_file in enumerate(wav_files):
+        inputs.extend(["-i", str(wav_file.resolve())])
+    
+    # Build filter: pad each file (except last) with silence, then concatenate
+    filter_parts = []
+    concat_inputs = []
+    
+    for i in range(len(wav_files)):
+        if i < len(wav_files) - 1:
+            # Add silence padding: pad_len is in samples
+            filter_parts.append(f"[{i}:a]apad=pad_len={pad_len_samples}[pad{i}]")
+            concat_inputs.append(f"[pad{i}]")
+        else:
+            # Last file doesn't need padding - reference it directly (no copy filter needed)
+            concat_inputs.append(f"[{i}:a]")
+    
+    # Concatenate all streams (padded + last one directly)
+    concat_filter = f"{';'.join(filter_parts)};{''.join(concat_inputs)}concat=n={len(wav_files)}:v=0:a=1[out]"
+    
+    # Build ffmpeg command
+    cmd = [
+        "ffmpeg",
+        *inputs,
+        "-filter_complex", concat_filter,
+        "-map", "[out]",
+        "-y",  # Overwrite output
+        str(output_path),
+    ]
+    
+    try:
+        logger.debug(f"Running ffmpeg to concatenate {len(wav_files)} audio files...")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        
+        # Get total duration
+        total_duration = get_audio_duration(output_path)
+        if total_duration:
+            logger.info(f"Concatenated {len(wav_files)} files into {output_path.name} ({total_duration:.2f}s total)")
+            if total_duration < 30.0:
+                logger.warning(f"Total duration ({total_duration:.2f}s) is less than MetaVoice's 30s minimum requirement")
+        else:
+            logger.info(f"Concatenated {len(wav_files)} files into {output_path.name}")
+        
+        return output_path
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg concatenation failed: {e.stderr}")
+        raise RuntimeError(f"Failed to concatenate reference audio files: {e.stderr}")
+
+
 
 
 

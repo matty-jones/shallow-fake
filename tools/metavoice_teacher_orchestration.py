@@ -9,7 +9,7 @@ import requests
 
 from shallow_fake.config import MetaVoiceTeacherConfig, VoiceConfig
 from shallow_fake.utils import ensure_dir, setup_logging
-from tools.reference_audio_utils import select_best_reference_clip
+from tools.reference_audio_utils import concatenate_reference_audio
 
 logger = setup_logging()
 
@@ -48,12 +48,11 @@ def prepare_reference_audio(config: VoiceConfig) -> Path:
     ensure_dir(reference_output_dir)
     reference_output_path = reference_output_dir / "voice_ref.wav"
 
-    logger.info(f"Selecting best reference clip from {len(wav_files)} files...")
-    select_best_reference_clip(
+    logger.info(f"Concatenating all {len(wav_files)} reference clips for MetaVoice (requires >=30s total)...")
+    concatenate_reference_audio(
         reference_dir=reference_dir,
         output_path=reference_output_path,
-        min_duration=5.0,
-        max_duration=30.0,
+        gap_duration=1.0,  # 1 second gap between files
     )
 
     return reference_output_path
@@ -85,12 +84,14 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
 
     # Resolve paths to absolute for Docker volume mount
     reference_audio_path_abs = reference_audio_path.resolve()
+    reference_audio_dir_abs = reference_audio_path_abs.parent.resolve()
 
     with open(env_file, "w") as f:
         f.write(f"VOICE_ID={config.voice_id}\n")
         f.write(f"METAVOICE_PORT={teacher.port}\n")
         f.write(f"METAVOICE_REPO_ID={teacher.huggingface_repo_id}\n")
         f.write(f"REFERENCE_AUDIO_PATH={reference_audio_path_abs}\n")
+        f.write(f"REFERENCE_AUDIO_DIR={reference_audio_dir_abs}\n")
         f.write(f"SPEAKER_REF_PATH={teacher.speaker_ref_path}\n")
 
     # Get docker-compose file path
@@ -125,9 +126,9 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
             logger.debug(f"Build stderr: {build_result.stderr}")
         logger.info("Docker image built successfully")
 
-        # Then start the container
-        start_args = compose_base_args + ["up", "-d"]
-        logger.info("Starting container...")
+        # Then start the container (force recreate to ensure new GPU config is applied)
+        start_args = compose_base_args + ["up", "-d", "--force-recreate"]
+        logger.info("Starting container (forcing recreate to apply GPU configuration)...")
         start_result = subprocess.run(
             start_args,
             check=True,
@@ -147,18 +148,18 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
         raise
 
     # Wait for service to be ready
-    base_url = teacher.base_url
-    max_retries = 60  # 2 minutes
+    base_url = f"http://localhost:{teacher.port}"
+    max_retries = 300  # 10 minutes (300 * 2 seconds = 600 seconds)
     retry_delay = 2
 
     logger.info(
         "Waiting for MetaVoice teacher model service to be ready "
-        "(this may take a few minutes on first run while model downloads)..."
+        "(this may take several minutes on first run while model compiles and initializes)..."
     )
 
     for attempt in range(max_retries):
         try:
-            # Try health endpoint or docs endpoint
+            # Try /docs endpoint (FastAPI Swagger UI) - same as XTTS uses /health
             response = requests.get(f"{base_url}/docs", timeout=5)
             if response.status_code == 200:
                 logger.info("MetaVoice teacher model service is ready")
@@ -176,6 +177,7 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
             time.sleep(retry_delay)
         else:
             # Check container status before raising error
+            container_name = f"{config.voice_id}_metavoice_teacher"
             try:
                 result = subprocess.run(
                     [
@@ -183,7 +185,7 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
                         "ps",
                         "-a",
                         "--filter",
-                        f"name={config.voice_id}_metavoice_teacher",
+                        f"name={container_name}",
                         "--format",
                         "{{.Status}}",
                     ],
@@ -198,7 +200,7 @@ def start_metavoice_teacher(config: VoiceConfig) -> None:
 
             raise RuntimeError(
                 f"MetaVoice teacher model service did not become ready after {max_retries * retry_delay} seconds. "
-                f"Check container logs: docker logs {config.voice_id}_metavoice_teacher"
+                f"Check container logs: docker logs {container_name}"
             )
 
 
@@ -245,10 +247,10 @@ def stop_metavoice_teacher(config: VoiceConfig) -> None:
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to stop MetaVoice teacher model service: {e.stderr}")
 
-    # Clean up .env file
+    # Don't clean up .env file immediately - keep it for debugging/manual testing
+    # It will be overwritten on next start anyway
     if env_file.exists():
-        env_file.unlink()
-        logger.debug(f"Cleaned up {env_file}")
+        logger.debug(f"Env file kept for debugging: {env_file}")
 
 
 def is_metavoice_teacher_running(config: VoiceConfig) -> bool:
@@ -268,7 +270,7 @@ def is_metavoice_teacher_running(config: VoiceConfig) -> bool:
     if not isinstance(teacher, MetaVoiceTeacherConfig):
         return False
 
-    base_url = teacher.base_url
+    base_url = f"http://localhost:{teacher.port}"
 
     try:
         response = requests.get(f"{base_url}/docs", timeout=2)

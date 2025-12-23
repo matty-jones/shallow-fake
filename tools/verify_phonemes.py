@@ -7,7 +7,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from faster_whisper import WhisperModel
 from piper_phonemize import phonemize_espeak
@@ -230,9 +230,15 @@ def verify_entry_worker(
     return (i, is_valid, distance, whisper_text, wav_path, audio_path)
 
 
-def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None):
-    """Verify dataset using phoneme-based quality checks (parallelized)."""
-    real_dataset_dir = config.paths.real_dataset_dir
+def verify_dataset(config: VoiceConfig, baseline_piper_model: str = None, dataset_dir: Optional[Path] = None):
+    """Verify dataset using phoneme-based quality checks (parallelized).
+    
+    Args:
+        config: Voice configuration
+        baseline_piper_model: Optional baseline Piper model for comparison
+        dataset_dir: Optional dataset directory to verify. If None, uses config.paths.real_dataset_dir
+    """
+    real_dataset_dir = dataset_dir if dataset_dir is not None else config.paths.real_dataset_dir
     metadata_csv = real_dataset_dir / "metadata.csv"
     wavs_dir = real_dataset_dir / "wavs"
 

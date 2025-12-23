@@ -22,7 +22,7 @@ synthetic:
   max_sentences: 3020
   tts_backend: http
   tts_http:
-    base_url: http://localhost:9010/tts
+    base_url: http://localhost:9010
     voice_id: claudia_clone
   teacher:
     kind: metavoice

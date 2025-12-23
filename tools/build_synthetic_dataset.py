@@ -43,23 +43,35 @@ class HTTPTTSBackend(TTSBackend):
         try:
             # Check if this is MetaVoice (uses different API format)
             if isinstance(self.teacher_config, MetaVoiceTeacherConfig):
-                # MetaVoice API: POST /tts with X-Payload header
-                url = f"{self.base_url}/tts"
-                payload = {
+                # MetaVoice API: POST /tts with multipart form data
+                # base_url should be http://localhost:9010 (no /tts), we add /tts here
+                # Remove /tts from base_url if present to avoid double /tts/tts
+                base = self.base_url.rstrip("/")
+                if base.endswith("/tts"):
+                    base = base[:-4]  # Remove /tts
+                url = f"{base}/tts"
+                
+                # MetaVoice expects multipart form data, not JSON headers
+                form_data = {
                     "text": text,
                     "speaker_ref_path": self.teacher_config.speaker_ref_path,
-                    "guidance": self.teacher_config.guidance,
-                    "top_p": self.teacher_config.top_p,
+                    "guidance": str(self.teacher_config.guidance),
+                    "top_p": str(self.teacher_config.top_p),
                 }
                 if self.teacher_config.top_k is not None:
-                    payload["top_k"] = self.teacher_config.top_k
+                    form_data["top_k"] = str(self.teacher_config.top_k)
 
-                headers = {"X-Payload": json.dumps(payload)}
-                # MetaVoice expects empty body when using speaker_ref_path
-                response = self.session.post(url, headers=headers, data=b"", timeout=300)
+                logger.debug(f"MetaVoice TTS request: URL={url}, form_data={form_data}")
+                response = self.session.post(url, data=form_data, timeout=300)
+                logger.debug(f"MetaVoice TTS response: status={response.status_code}, content_length={len(response.content)}")
             else:
                 # XTTS API: POST /tts with JSON body
-                url = f"{self.base_url}"
+                # base_url might be http://localhost:9010 or http://localhost:9010/tts
+                # Ensure it ends with /tts
+                base = self.base_url.rstrip("/")
+                if not base.endswith("/tts"):
+                    base = f"{base}/tts"
+                url = base
                 params = {"text": text, "voice": self.voice_id}
                 response = self.session.post(url, json=params, timeout=120)
 
@@ -71,16 +83,13 @@ class HTTPTTSBackend(TTSBackend):
 
             return output_path.exists()
         except requests.exceptions.HTTPError as e:
-            # Log more details for 500 errors
-            if e.response.status_code == 500:
-                logger.error(f"HTTP TTS 500 error for text '{text[:50]}...': {e}")
-                try:
-                    error_detail = e.response.json().get("detail", "No details available")
-                    logger.error(f"Server error details: {error_detail}")
-                except Exception:
-                    logger.error(f"Server response: {e.response.text[:200]}")
-            else:
-                logger.error(f"HTTP TTS error for text '{text[:50]}...': {e}")
+            # Log more details for all HTTP errors
+            logger.error(f"HTTP TTS {e.response.status_code} error for text '{text[:50]}...': {e}")
+            try:
+                error_detail = e.response.json().get("detail", "No details available")
+                logger.error(f"Server error details: {error_detail}")
+            except Exception:
+                logger.error(f"Server response: {e.response.text[:500]}")
             return False
         except requests.exceptions.ConnectionError as e:
             # Connection errors often indicate server crash or overload (e.g., GPU OOM)
@@ -233,7 +242,13 @@ def generate_synthetic_entry(
         raw_audio_path = Path(tmp.name)
 
     # Generate audio
-    if not tts_backend.generate(text, raw_audio_path):
+    try:
+        if not tts_backend.generate(text, raw_audio_path):
+            logger.warning(f"TTS generation failed for entry {index}: '{text[:50]}...'")
+            raw_audio_path.unlink(missing_ok=True)
+            return None
+    except Exception as e:
+        logger.error(f"Exception during TTS generation for entry {index}: {e}", exc_info=True)
         raw_audio_path.unlink(missing_ok=True)
         return None
 
@@ -272,8 +287,9 @@ def build_synthetic_dataset(config: VoiceConfig):
     # Load corpus
     sentences = load_corpus(corpus_path, config.synthetic.max_sentences)
     if not sentences:
-        logger.error("No sentences loaded from corpus")
-        return
+        error_msg = "No sentences loaded from corpus"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
     # Start teacher model service if configured
     teacher_started = False
@@ -316,7 +332,7 @@ def build_synthetic_dataset(config: VoiceConfig):
         except Exception as e:
             logger.error(f"Failed to start teacher model service: {e}")
             logger.error("Synthetic dataset generation aborted")
-            return
+            raise RuntimeError(f"Failed to start teacher model service: {e}") from e
 
     try:
         # Create TTS backend
@@ -327,8 +343,9 @@ def build_synthetic_dataset(config: VoiceConfig):
                 teacher_config=config.synthetic.teacher,
             )
         else:
-            logger.error(f"Unsupported TTS backend: {config.synthetic.tts_backend}")
-            return
+            error_msg = f"Unsupported TTS backend: {config.synthetic.tts_backend}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         # Generate synthetic entries in parallel
         logger.info(f"Generating {len(sentences)} synthetic entries...")
@@ -403,15 +420,15 @@ def build_synthetic_dataset(config: VoiceConfig):
                             timeout=10,
                         )
                         if result.stdout:
-                            logger.error("Container logs (stdout):")
+                            logger.info("Container logs (stdout):")
                             for line in result.stdout.split("\n")[-100:]:  # Last 100 lines
                                 if line.strip():
-                                    logger.error(f"  {line}")
+                                    logger.info(f"  {line}")
                         if result.stderr:
-                            logger.error("Container logs (stderr):")
+                            logger.info("Container logs (stderr):")
                             for line in result.stderr.split("\n")[-100:]:  # Last 100 lines
                                 if line.strip():
-                                    logger.error(f"  {line}")
+                                    logger.info(f"  {line}")
                     except subprocess.TimeoutExpired:
                         logger.warning("Timeout retrieving container logs")
                     except Exception as log_error:
@@ -452,15 +469,9 @@ def build_synthetic_dataset(config: VoiceConfig):
 
     # Now run phoneme verification on the synthetic dataset
     logger.info("Running phoneme verification on synthetic dataset...")
-    # Note: Phoneme verification should be run separately via CLI
-    # to avoid circular imports and allow more control
-
-    # Temporarily update config paths to point to synthetic dataset
-    original_real_dir = config.paths.real_dataset_dir
-    config.paths.real_dataset_dir = synth_dataset_dir
     from tools.verify_phonemes import verify_dataset
-    verify_dataset(config)
-    config.paths.real_dataset_dir = original_real_dir
+    # Pass synthetic dataset directory directly instead of modifying config
+    verify_dataset(config, dataset_dir=synth_dataset_dir)
 
 
 if __name__ == "__main__":

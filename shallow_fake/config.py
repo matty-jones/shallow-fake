@@ -137,13 +137,13 @@ class MetaVoiceTeacherConfig(BaseModel):
     """MetaVoice teacher model service configuration."""
 
     kind: Literal["metavoice"] = Field(default="metavoice")
-    base_url: str = Field(default="http://localhost:58003", description="Base URL for MetaVoice HTTP server")
+    port: int = Field(default=9010, ge=1024, le=65535, description="Port for MetaVoice HTTP server")
+    base_url: str = Field(default="http://localhost:9010", description="Base URL for MetaVoice HTTP server")
     huggingface_repo_id: str = Field(default="metavoiceio/metavoice-1B-v0.1", description="HuggingFace repository ID for MetaVoice model")
     speaker_ref_path: str = Field(default="/speakers/voice_ref.wav", description="Path inside container to reference audio file")
     guidance: float = Field(default=3.0, ge=0.0, description="Guidance scale for MetaVoice generation")
     top_p: float = Field(default=0.95, ge=0.0, le=1.0, description="Top-p sampling parameter")
     top_k: Optional[int] = Field(default=200, ge=1, description="Top-k sampling parameter")
-    port: int = Field(default=58003, ge=1024, le=65535, description="Port for MetaVoice HTTP server")
     reference_audio_dir: Path = Field(description="Directory containing reference audio files (used to select best clip)")
 
     @field_validator("reference_audio_dir", mode="before")
@@ -312,7 +312,7 @@ class VoiceConfig(BaseModel):
                 teacher["reference_audio_dir"] = str(project_root / teacher["reference_audio_dir"])
             # Handle MetaVoice base_url default if not set
             if teacher.get("kind") == "metavoice" and "base_url" not in teacher:
-                port = teacher.get("port", 58003)
+                port = teacher.get("port", 9010)
                 teacher["base_url"] = f"http://localhost:{port}"
 
         if "tms" in data and "docker_compose_file" in data["tms"]:

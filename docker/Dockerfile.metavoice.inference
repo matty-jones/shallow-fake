@@ -10,13 +10,15 @@
 # --- Stage 1: CUDA + Python ---------------------------------------------------
 # Use devel image for build stage (has CUDA headers), runtime for final
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS base
+# Put PyTorch's bundled cuDNN first to avoid version conflicts
+# PyTorch comes with cuDNN 9.10.2, system CUDA has 9.8.0
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     CUDA_HOME=/usr/local/cuda \
     PATH=${CUDA_HOME}/bin:${PATH} \
-    LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH} \
-    CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CPLUS_INCLUDE_PATH} \
-    C_INCLUDE_PATH=${CUDA_HOME}/include:${C_INCLUDE_PATH}
+    LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${CUDA_HOME}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH} \
+    CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CUDA_HOME}/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH} \
+    C_INCLUDE_PATH=${CUDA_HOME}/include:${CUDA_HOME}/targets/x86_64-linux/include:${C_INCLUDE_PATH}
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -52,6 +54,17 @@ RUN pip install --no-cache-dir \
 # Fix: torch nightlies import TypeIs from typing_extensions (needs >=4.12.0).
 # Your log showed typing_extensions in the container was too old.
 RUN pip install --no-cache-dir typing_extensions==4.15.0
+
+# Remove system cuDNN 9.8.0 libraries to force PyTorch to use its bundled cuDNN 9.10.2
+# PyTorch was compiled against cuDNN 9.10.2, but system has 9.8.0 which causes version mismatch
+# We delete the actual library files and symlinks so they won't be found by the dynamic linker
+RUN rm -f /lib/x86_64-linux-gnu/libcudnn.so* && \
+    rm -f /usr/lib/x86_64-linux-gnu/libcudnn.so* && \
+    rm -f /etc/alternatives/libcudnn* 2>/dev/null || true
+
+# Update LD_LIBRARY_PATH to prioritize PyTorch's bundled cuDNN (9.10.2)
+# This ensures PyTorch can find its bundled cuDNN if it's in a separate location
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:${LD_LIBRARY_PATH}
 
 # Your runtime deps (install with deps enabled)
 RUN pip install --no-cache-dir \
@@ -146,56 +159,87 @@ RUN sed -i -e 's/from attr import dataclass/from dataclasses import dataclass/' 
 # The error shows query is float32 but key/value are float16, causing scaled_dot_product_attention to fail
 RUN sed -i 's/y = F\.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0\.0)/y = F.scaled_dot_product_attention(q.to(k.dtype), k, v, attn_mask=mask, dropout_p=0.0)/' fam/llm/fast_model.py
 
-# Fix dtype mismatch: ensure model is converted to float16 to avoid bfloat16/float16 mix
-# The error occurs INSIDE build_model during generate() call, so we need to convert BEFORE that
-# Patch fast_inference_utils.py to convert model to float16 inside build_model before generate()
+# Fix dtype mismatch: ensure model and spk_emb are converted to float16, encoded stays int
+# NOTE: encoded contains token indices (integers) and must NOT be converted to float16
+# TorchDynamo may infer wrong dtype during compilation, so we explicitly ensure encoded is int
+# Patch fast_inference_utils.py to convert model and spk_emb to float16 in TWO places:
+# 1. In build_model() during initialization (for container startup)
+# 2. In main() during actual inference (for API calls)
 RUN python <<'PY'
 with open('fam/llm/fast_inference_utils.py', 'r') as f:
     lines = f.readlines()
 
-# Find the generate() call in build_model and insert model conversion before it
-inserted = False
+# First: Find the generate() call in build_model and insert model + spk_emb conversion before it
+inserted_build = False
 for i, line in enumerate(lines):
-    if not inserted and 'def build_model' in line:
+    if not inserted_build and 'def build_model' in line:
         # We're in build_model function, look for the generate() call
-        # The error shows it's at line 375, so look for 'y = generate(' or similar
         for j in range(i, min(i + 400, len(lines))):
             if 'generate(' in lines[j] and ('y =' in lines[j] or '=' in lines[j]):
-                # Found the generate call, insert model conversion before it
-                # Look backwards to find where model is available (after load_state_dict or model creation)
-                # Insert right before the generate line
+                # Found the generate call, insert model and spk_emb conversion before it
                 indent = len(lines[j]) - len(lines[j].lstrip())
-                lines.insert(j, ' ' * indent + '# Convert model to float16 to avoid bfloat16/float16 dtype mismatches\n')
-                lines.insert(j + 1, ' ' * indent + 'model = model.half()\n')
-                inserted = True
+                # Convert model to float16
+                lines.insert(j, ' ' * indent + '# Convert model and spk_emb to float16 to avoid dtype mismatches (initialization)\n')
+                lines.insert(j + 1, ' ' * indent + '# NOTE: encoded contains token indices (integers) and must remain int\n')
+                lines.insert(j + 2, ' ' * indent + 'model = model.half()\n')
+                # Convert spk_emb to float16 to match model dtype
+                lines.insert(j + 3, ' ' * indent + 'spk_emb = spk_emb.half()\n')
+                # Explicitly ensure encoded is integer dtype (torch.long) to prevent TorchDynamo from inferring float16
+                lines.insert(j + 4, ' ' * indent + 'encoded = encoded.to(torch.long)\n')
+                inserted_build = True
                 break
-        if inserted:
+        if inserted_build:
             break
 
-# If we didn't find generate, try to find load_state_dict and insert after that
-if not inserted:
+# Second: Find the generate() call in main() and insert spk_emb conversion before it (for runtime inference)
+# The model is already float16 from initialization, but spk_emb might be bfloat16 from the API call
+inserted_main = False
+for i, line in enumerate(lines):
+    if not inserted_main and 'def main(' in line:
+        # We're in main function, look for the generate() call
+        for j in range(i, min(i + 100, len(lines))):
+            # Look for 'y = generate(' pattern (can be on same line or split)
+            if 'generate(' in lines[j]:
+                # Check if this is the assignment (y = generate or y=generate)
+                if 'y =' in lines[j] or 'y=' in lines[j] or (j > 0 and ('y =' in lines[j-1] or 'y=' in lines[j-1])):
+                    # Found the generate call in main(), insert spk_emb conversion before it
+                    indent = len(lines[j]) - len(lines[j].lstrip())
+                    # Convert spk_emb to float16 to match model dtype (model is already float16 from initialization)
+                    lines.insert(j, ' ' * indent + '# Convert spk_emb to float16 to match model dtype (runtime inference)\n')
+                    lines.insert(j + 1, ' ' * indent + 'spk_emb = spk_emb.half()\n')
+                    # Explicitly ensure encoded is integer dtype (torch.long)
+                    lines.insert(j + 2, ' ' * indent + 'encoded = encoded.to(torch.long)\n')
+                    inserted_main = True
+                    break
+        if inserted_main:
+            break
+
+# Fallback: If we didn't find generate in build_model, try to find load_state_dict
+if not inserted_build:
     for i, line in enumerate(lines):
         if 'load_state_dict' in line and 'model' in line:
             # Found model loading, insert conversion after this statement completes
-            # Look for the next non-empty line at same or less indentation
             base_indent = len(line) - len(line.lstrip())
             for j in range(i + 1, min(i + 10, len(lines))):
                 next_line = lines[j]
                 if next_line.strip() and not next_line.strip().startswith('#'):
                     next_indent = len(next_line) - len(next_line.lstrip())
                     if next_indent <= base_indent:
-                        # Insert before this line
                         indent = base_indent
                         lines.insert(j, ' ' * indent + '# Convert model to float16 to avoid bfloat16/float16 dtype mismatches\n')
                         lines.insert(j + 1, ' ' * indent + 'model = model.half()\n')
-                        inserted = True
+                        inserted_build = True
                         break
-            if inserted:
+            if inserted_build:
                 break
 
 with open('fam/llm/fast_inference_utils.py', 'w') as f:
     f.writelines(lines)
 PY
 
-EXPOSE 58003
-CMD [ "python", "serving.py", "--port=58003" ]
+# Ensure PyTorch's bundled cuDNN is used (9.10.2) instead of system cuDNN (9.8.0)
+# This must be set at runtime, not just build time
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:${LD_LIBRARY_PATH}
+
+EXPOSE 9010
+CMD [ "python", "serving.py", "--port=9010" ]
