@@ -16,8 +16,9 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Ensure CUDA libraries are in library path, but prioritize PyTorch's bundled cuDNN
       # PyTorch comes with cuDNN 9.10.2 bundled, so we put it first to avoid version conflicts
-      # NOTE: We exclude /usr/lib/x86_64-linux-gnu to prevent finding system cuDNN 9.8.0
-      - LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
+      # FFmpeg 6.x libraries are in /usr/local/lib (built from source)
+      # torchcodec libraries are in dist-packages/torchcodec
+      - LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/lib/python3.10/dist-packages/torchcodec:/usr/local/lib:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
       # Force PyTorch CUDA detection (may help with CDI initialization)
       - TORCH_USE_CUDA_DSA=0
     # GPU passthrough configuration using CDI (Container Device Interface)

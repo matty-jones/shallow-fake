@@ -20,28 +20,59 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CUDA_HOME}/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH} \
     C_INCLUDE_PATH=${CUDA_HOME}/include:${CUDA_HOME}/targets/x86_64-linux/include:${C_INCLUDE_PATH}
 
+# Install FFmpeg 6.x from source (torchcodec requires FFmpeg 6.x shared libraries)
+# Ubuntu 22.04 default repos only have FFmpeg 4.4.2, but torchcodec needs 6.x
+# Building from source ensures we get the right version with all required libraries
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.10 python3.10-dev python3-pip \
-        ffmpeg git git-lfs curl ca-certificates && \
+        git git-lfs curl ca-certificates \
+        build-essential pkg-config \
+        libx264-dev libmp3lame-dev libopus-dev \
+        yasm nasm && \
     ln -sf /usr/bin/python3.10 /usr/bin/python && \
     pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    # Build FFmpeg 6.1 from source with minimal codecs (faster build)
+    cd /tmp && \
+    git clone --depth 1 --branch release/6.1 https://git.ffmpeg.org/ffmpeg.git ffmpeg-src && \
+    cd ffmpeg-src && \
+    ./configure \
+        --prefix=/usr/local \
+        --enable-shared \
+        --enable-pic \
+        --enable-gpl \
+        --enable-libx264 \
+        --enable-libmp3lame \
+        --enable-libopus \
+        --disable-static \
+        --disable-doc \
+        --disable-debug && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    cd / && rm -rf /tmp/ffmpeg-src && \
+    # Only remove FFmpeg-specific build tools, keep others for xformers build in deps stage
+    apt-get purge -y yasm nasm && \
+    apt-get autoremove -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- Stage 2: Python deps -----------------------------------------------------
 FROM base AS deps
 # build-time libs for PyAV (used by AudioCraft) and C++ compiler for xFormers
 # CUDA headers are already in devel image
+# FFmpeg 6.x is already built and installed in base stage
+# Ensure CUDA is in PATH for xformers build
+ENV PATH=/usr/local/cuda/bin:${PATH}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         pkg-config \
         build-essential \
         g++ \
         cmake \
-        libavdevice-dev libavformat-dev libavfilter-dev \
-        libavcodec-dev  libavutil-dev  \
-        libswresample-dev libswscale-dev \
         libsndfile1 && \
+    # Verify nvcc is available
+    which nvcc || (echo "ERROR: nvcc not found in PATH" && exit 1) && \
+    nvcc --version && \
     rm -rf /var/lib/apt/lists/*
 
 # 5080 requires sm_120 → use nightly cu128 wheels
@@ -98,16 +129,20 @@ RUN pip install --no-cache-dir --no-deps \
 
 
 # These have to be done after audiocraft and torch, otherwise they will be downgraded
-RUN pip install --no-cache-dir --no-deps \
+# NOTE: We do NOT install torchcodec because it's incompatible with PyTorch nightly cu128
+# Uninstall torchcodec if it was installed as a dependency, then create a stub module
+RUN pip uninstall -y torchcodec 2>/dev/null || true && \
+    pip install --no-cache-dir --no-deps \
         torchdiffeq \
         torchmetrics
 
 # Install xformers with patch to bypass PyTorch version check for dev versions
 # xFormers rejects PyTorch dev versions, so we just comment out the entire if block
-
+# Ensure CUDA environment is properly set for xformers build
 ENV CUDA_HOME=/usr/local/cuda \
     CUDA_PATH=/usr/local/cuda \
     CUDACXX=/usr/local/cuda/bin/nvcc \
+    PATH=/usr/local/cuda/bin:${PATH} \
     CPATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include \
     C_INCLUDE_PATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include \
     CPLUS_INCLUDE_PATH=/usr/local/cuda/include:/usr/local/cuda/targets/x86_64-linux/include
@@ -116,6 +151,8 @@ RUN git clone --depth 1 https://github.com/facebookresearch/xformers.git /tmp/xf
     cd /tmp/xformers && \
     git submodule update --init --recursive && \
     sed -i '/if torch\.__version__ < "2\.10":/,/^[[:space:]]*)$/s/^[[:space:]]*/        # /' setup.py && \
+    # Verify nvcc is accessible before building
+    which nvcc && nvcc --version && \
     USE_CUDA=1 TORCH_CUDA_ARCH_LIST=12.0 \
     pip install -v --no-build-isolation -U . && \
     rm -rf /tmp/xformers
@@ -123,18 +160,434 @@ RUN git clone --depth 1 https://github.com/facebookresearch/xformers.git /tmp/xf
 # Sanity check at build-time: use getattr to safely check version (handles cases where __version__ may not be exposed)
 RUN python -c "import typing_extensions as te; from typing_extensions import TypeIs; import torch; version = getattr(te, '__version__', 'unknown'); print('typing_extensions', version, 'torch', torch.__version__)"
 
-# torchaudio nightly no longer ships `torchaudio.backend`;
-# keep your original shim (NO line-continuation backslashes here; heredocs are picky)
+# Create stub torchcodec module to prevent import errors
+# torchcodec is incompatible with PyTorch nightly cu128, so we provide a minimal stub
+RUN python - <<'PY'
+import pathlib
+import site
+import sys
+
+# Find site-packages directory - use multiple methods for reliability
+site_packages = None
+# Method 1: Try site.getsitepackages()
+try:
+    candidates = [p for p in site.getsitepackages() if 'site-packages' in p]
+    if candidates:
+        site_packages = candidates[0]
+except:
+    pass
+
+# Method 2: Use site.getsitepackages() without filtering
+if not site_packages:
+    try:
+        pkgs = site.getsitepackages()
+        if pkgs:
+            site_packages = pkgs[0]
+    except:
+        pass
+
+# Method 3: Use sys.path to find site-packages
+if not site_packages:
+    for p in sys.path:
+        if 'site-packages' in p:
+            site_packages = p
+            break
+
+# Method 4: Fallback to dist-packages (Debian/Ubuntu)
+if not site_packages:
+    for p in sys.path:
+        if 'dist-packages' in p:
+            site_packages = p
+            break
+
+if not site_packages:
+    raise RuntimeError("Could not find site-packages directory")
+
+torchcodec_path = pathlib.Path(site_packages) / "torchcodec"
+torchcodec_path.mkdir(exist_ok=True)
+
+# Create __init__.py with minimal stub
+(torchcodec_path / "__init__.py").write_text('''
+"""Stub torchcodec module to prevent import errors.
+torchcodec is incompatible with PyTorch nightly cu128, so we provide minimal stubs."""
+__version__ = "0.0.0-stub"
+''')
+
+# Create encoders submodule
+encoders_path = torchcodec_path / "encoders"
+encoders_path.mkdir(exist_ok=True)
+(encoders_path / "__init__.py").write_text('''
+"""Stub torchcodec.encoders module."""
+# Create a minimal AudioEncoder class that won't be used (torchaudio.load() is shimmed)
+class AudioEncoder:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("torchcodec is not available. Use torchaudio.load() which has been shimmed to use soundfile.")
+''')
+
+# Create decoders submodule
+decoders_path = torchcodec_path / "decoders"
+decoders_path.mkdir(exist_ok=True)
+(decoders_path / "__init__.py").write_text('''
+"""Stub torchcodec.decoders module."""
+# Create a minimal AudioDecoder class that won't be used (torchaudio.load() is shimmed)
+class AudioDecoder:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("torchcodec is not available. Use torchaudio.load() which has been shimmed to use soundfile.")
+''')
+
+# Create _core submodule (minimal stub)
+core_path = torchcodec_path / "_core"
+core_path.mkdir(exist_ok=True)
+(core_path / "__init__.py").write_text('''
+"""Stub torchcodec._core module."""
+# Minimal stubs for metadata classes that might be imported
+class AudioStreamMetadata:
+    pass
+
+class VideoStreamMetadata:
+    pass
+''')
+
+# Create _core/_metadata.py stub (imported by _core/__init__.py)
+metadata_path = core_path / "_metadata.py"
+metadata_path.write_text('''
+"""Stub torchcodec._core._metadata module."""
+# Minimal stubs for metadata that might be imported
+class AudioStreamMetadata:
+    pass
+
+class VideoStreamMetadata:
+    pass
+''')
+
+# Create _core/ops.py stub - this is where the error happens
+# When ops.py is imported, it tries to load shared libraries and fails
+# We make it return dummy values so the import succeeds, but nothing will actually use them
+# because torchaudio.load() is shimmed to use soundfile
+ops_path = core_path / "ops.py"
+ops_path.write_text('''
+"""Stub torchcodec._core.ops module to prevent shared library loading errors."""
+# This module normally tries to load libtorchcodec shared libraries at import time
+# We provide a stub that returns dummy values so the import succeeds
+# The actual functions won't be used because torchaudio.load() is shimmed
+def load_torchcodec_shared_libraries():
+    """Stub function that returns dummy values to allow import to succeed."""
+    # Return dummy values: (ffmpeg_major_version, core_library_path)
+    # These won't be used because torchaudio.load() is shimmed to use soundfile
+    return (6, None)
+
+# Stub any other functions/classes that might be imported from ops
+# These are placeholders and won't actually be used
+__all__ = ['load_torchcodec_shared_libraries']
+''')
+PY
+
+# torchaudio nightly no longer ships `torchaudio.backend` and `torchaudio.info`;
+# create shims for both (NO line-continuation backslashes here; heredocs are picky)
 RUN python - <<'PY'
 import pathlib, textwrap, importlib.util
 ta = importlib.util.find_spec("torchaudio").submodule_search_locations[0]
-backend = pathlib.Path(ta) / "backend"
+ta_path = pathlib.Path(ta)
+
+# Create backend shim (existing)
+backend = ta_path / "backend"
 backend.mkdir(exist_ok=True)
 (backend/"__init__.py").write_text("from .common import AudioMetaData\n")
 (backend/"common.py").write_text(textwrap.dedent('''
     class AudioMetaData:
-        def __init__(self,*a,**kw): pass
+        def __init__(self, sample_rate=None, num_frames=None, num_channels=None, bits_per_sample=None, encoding=None, **kwargs):
+            self.sample_rate = sample_rate
+            self.num_frames = num_frames
+            self.num_channels = num_channels
+            self.bits_per_sample = bits_per_sample
+            self.encoding = encoding
+            # Store any additional kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 '''))
+
+# Create info_shim.py module that provides torchaudio.info() using soundfile as fallback
+info_shim_module = ta_path / "info_shim.py"
+info_shim_module.write_text(textwrap.dedent('''
+    """Shim for torchaudio.info() using soundfile as fallback."""
+    import soundfile as sf
+    from .backend.common import AudioMetaData
+    
+    def info(file, **kwargs):
+        """
+        Shim for torchaudio.info() using soundfile as fallback.
+        Returns AudioMetaData compatible with torchaudio's expected format.
+        """
+        try:
+            sf_info = sf.info(file)
+            # Handle bits_per_sample: subtype_info can be a string or dict
+            bits_per_sample = None
+            if hasattr(sf_info, 'subtype_info'):
+                if isinstance(sf_info.subtype_info, dict):
+                    bits_per_sample = sf_info.subtype_info.get('bit_depth', None)
+                # If it's a string, we can't extract bit depth easily, leave it None
+            
+            # Convert soundfile.Info to AudioMetaData format
+            return AudioMetaData(
+                sample_rate=sf_info.samplerate,
+                num_frames=sf_info.frames,
+                num_channels=sf_info.channels,
+                bits_per_sample=bits_per_sample,
+                encoding=sf_info.subtype,
+                duration=sf_info.duration,
+                format=sf_info.format,
+                subtype=sf_info.subtype
+            )
+        except Exception as e:
+            # If soundfile fails, we can't use torchaudio.load() as fallback
+            # because it requires torchcodec which isn't installed
+            # Just raise the original error with more context
+            raise RuntimeError(f"Failed to get audio info from {file} using soundfile: {e}")
+'''))
+
+# Create load_shim.py module that provides torchaudio.load() using soundfile as fallback
+# This is needed because torchcodec is incompatible with PyTorch nightly cu128
+load_shim_module = ta_path / "load_shim.py"
+load_shim_module.write_text(textwrap.dedent('''
+    """Shim for torchaudio.load() using soundfile as fallback when torchcodec unavailable."""
+    import soundfile as sf
+    import torch
+    import numpy as np
+    
+    def load(filepath, **kwargs):
+        """
+        Shim for torchaudio.load() using soundfile as fallback.
+        Returns (waveform, sample_rate) tuple compatible with torchaudio format.
+        """
+        try:
+            # Use soundfile to load audio
+            data, sample_rate = sf.read(filepath, dtype='float32', always_2d=False)
+            
+            # Convert to torch tensor
+            if len(data.shape) == 1:
+                # Mono audio: shape is (T,), convert to (1, T) for channels_first
+                waveform = torch.from_numpy(data).unsqueeze(0)
+            else:
+                # Multi-channel: shape is (T, C), transpose to (C, T) for channels_first
+                waveform = torch.from_numpy(data).T
+            
+            # Handle num_frames if specified
+            if 'num_frames' in kwargs:
+                num_frames = kwargs['num_frames']
+                if waveform.shape[-1] > num_frames:
+                    waveform = waveform[..., :num_frames]
+                elif waveform.shape[-1] < num_frames:
+                    # Pad with zeros
+                    pad_length = num_frames - waveform.shape[-1]
+                    waveform = torch.nn.functional.pad(waveform, (0, pad_length))
+            
+            return waveform, sample_rate
+        except Exception as e:
+            raise RuntimeError(f"Failed to load audio from {filepath} using soundfile: {e}")
+'''))
+
+# Create save_shim.py module that provides torchaudio.save() using soundfile as fallback
+# torchaudio.save() also uses torchcodec, so we need to shim it too
+save_shim_module = ta_path / "save_shim.py"
+save_shim_module.write_text(textwrap.dedent('''
+    """Shim for torchaudio.save() using soundfile as fallback when torchcodec unavailable."""
+    import soundfile as sf
+    import torch
+    import numpy as np
+    
+    def save(filepath, waveform, sample_rate, **kwargs):
+        """
+        Shim for torchaudio.save() using soundfile as fallback.
+        Args:
+            filepath: Path to save the audio file
+            waveform: torch.Tensor of shape (C, T) or (T,) - channels_first format
+            sample_rate: Sample rate in Hz
+        """
+        try:
+            # Convert torch tensor to numpy
+            if isinstance(waveform, torch.Tensor):
+                # Convert to numpy and handle channels_first format
+                if len(waveform.shape) == 1:
+                    # Mono: (T,) -> (T,)
+                    data = waveform.detach().cpu().numpy()
+                elif len(waveform.shape) == 2:
+                    # Multi-channel: (C, T) -> (T, C) for soundfile
+                    data = waveform.detach().cpu().numpy().T
+                else:
+                    raise ValueError(f"Unsupported waveform shape: {waveform.shape}")
+            else:
+                data = np.asarray(waveform)
+            
+            # Ensure float32
+            if data.dtype != np.float32:
+                data = data.astype(np.float32)
+            
+            # Clamp to [-1, 1] range (soundfile expects this)
+            data = np.clip(data, -1.0, 1.0)
+            
+            # Save using soundfile
+            sf.write(filepath, data, int(sample_rate))
+        except Exception as e:
+            raise RuntimeError(f"Failed to save audio to {filepath} using soundfile: {e}")
+'''))
+
+# Patch torchaudio.__init__.py to import and expose both info() and load() shims
+# Append at the end to avoid breaking existing imports
+ta_init = ta_path / "__init__.py"
+if ta_init.exists():
+    with open(ta_init, 'r') as f:
+        content = f.read()
+    
+    # Check if shims already added
+    if 'from .info_shim import info' not in content:
+        # Append the shim imports at the end of the file
+        with open(ta_init, 'a') as f:
+            f.write('\n# Shims for torchaudio.info() and load() - added for compatibility with cu128 nightly\n')
+            f.write('# These use soundfile as fallback when torchcodec is unavailable\n')
+            f.write('try:\n')
+            f.write('    from .info_shim import info\n')
+            f.write('except ImportError:\n')
+            f.write('    pass  # info() not available\n')
+    
+    # Replace load() and save() entirely with our shims to avoid torchcodec import issues
+    # The original load() and save() call load_with_torchcodec/save_with_torchcodec which use torchcodec
+    # Instead of commenting out (which breaks syntax), we just replace at the end
+    # Python will use the last assignment, so our shims will override the original functions
+    if 'load_shim' not in content:
+        # Simply append our shim replacements at the end - they will override the original functions
+        with open(ta_init, 'a') as f:
+            f.write('\n# Replace load() and save() with soundfile-based shims to avoid torchcodec dependency\n')
+            f.write('# This overrides the original load() and save() that require torchcodec\n')
+            f.write('# NOTE: These assignments happen after the original function definitions, so they take precedence\n')
+            f.write('try:\n')
+            f.write('    from .load_shim import load as load_shim_impl\n')
+            f.write('    from .save_shim import save as save_shim_impl\n')
+            f.write('    # Override the original load() and save() functions\n')
+            f.write('    # This must happen AFTER the original definitions to override them\n')
+            f.write('    import sys\n')
+            f.write('    # Force replacement by deleting from module dict first\n')
+            f.write('    if "load" in sys.modules[__name__].__dict__:\n')
+            f.write('        del sys.modules[__name__].__dict__["load"]\n')
+            f.write('    if "save" in sys.modules[__name__].__dict__:\n')
+            f.write('        del sys.modules[__name__].__dict__["save"]\n')
+            f.write('    load = load_shim_impl\n')
+            f.write('    save = save_shim_impl\n')
+            f.write('except ImportError:\n')
+            f.write('    pass  # load()/save() shims not available, keep original\n')
+PY
+
+# Patch torchaudio._torchcodec.py to prevent import errors when torchcodec is unavailable
+# This module tries to import torchcodec at import time, which fails if torchcodec can't load
+RUN python - <<'PY'
+import pathlib
+import importlib.util
+
+ta = importlib.util.find_spec("torchaudio").submodule_search_locations[0]
+ta_path = pathlib.Path(ta)
+torchcodec_module = ta_path / "_torchcodec.py"
+
+if torchcodec_module.exists():
+    with open(torchcodec_module, 'r') as f:
+        content = f.read()
+    
+    # Check if already patched
+    if 'torchcodec stub' not in content:
+        # Wrap the torchcodec imports in try/except to prevent import errors
+        # We need to preserve indentation, so we'll process line by line
+        import re
+        
+        lines = content.split('\n')
+        new_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Match: from torchcodec.encoders import AudioEncoder (with any indentation)
+            if re.match(r'(\s*)from torchcodec\.encoders import AudioEncoder', line):
+                indent = re.match(r'(\s*)', line).group(1)
+                # Replace with try/except block preserving indentation
+                new_lines.append(f"{indent}try:")
+                new_lines.append(f"{indent}    from torchcodec.encoders import AudioEncoder")
+                new_lines.append(f"{indent}except (ImportError, RuntimeError):")
+                new_lines.append(f"{indent}    # torchcodec unavailable, use stub")
+                new_lines.append(f"{indent}    class AudioEncoder:")
+                new_lines.append(f"{indent}        def __init__(self, *args, **kwargs):")
+                new_lines.append(f'{indent}            raise RuntimeError("torchcodec unavailable, use torchaudio.load() which is shimmed")')
+                i += 1
+            # Match: from torchcodec.decoders import AudioDecoder (with any indentation)
+            elif re.match(r'(\s*)from torchcodec\.decoders import AudioDecoder', line):
+                indent = re.match(r'(\s*)', line).group(1)
+                # Replace with try/except block preserving indentation
+                new_lines.append(f"{indent}try:")
+                new_lines.append(f"{indent}    from torchcodec.decoders import AudioDecoder")
+                new_lines.append(f"{indent}except (ImportError, RuntimeError):")
+                new_lines.append(f"{indent}    # torchcodec unavailable, use stub")
+                new_lines.append(f"{indent}    class AudioDecoder:")
+                new_lines.append(f"{indent}        def __init__(self, *args, **kwargs):")
+                new_lines.append(f'{indent}            raise RuntimeError("torchcodec unavailable, use torchaudio.load() which is shimmed")')
+                i += 1
+            else:
+                new_lines.append(line)
+                i += 1
+        
+        content = '\n'.join(new_lines)
+        
+        with open(torchcodec_module, 'w') as f:
+            f.write(content)
+        print('Patched torchaudio._torchcodec.py to handle torchcodec import errors')
+    
+    # Also patch save_with_torchcodec() to catch errors and use our shim
+    # Find the except block that handles AudioEncoder errors and modify it
+    if torchcodec_module.exists():
+        with open(torchcodec_module, 'r') as f:
+            content = f.read()
+        
+        # Check if already patched
+        if 'save_shim_fallback' not in content:
+            lines = content.split('\n')
+            new_lines = []
+            i = 0
+            
+            # First, add import at the top of the file (after other imports)
+            import_added = False
+            while i < len(lines):
+                line = lines[i]
+                new_lines.append(line)
+                
+                # Add our import after the last import statement
+                if not import_added and ('import ' in line or 'from ' in line):
+                    # Check if next line is not an import
+                    if i + 1 < len(lines) and not ('import ' in lines[i+1] or 'from ' in lines[i+1] or lines[i+1].strip().startswith('#')):
+                        new_lines.append('')
+                        new_lines.append('# Import save shim for fallback')
+                        new_lines.append('try:')
+                        new_lines.append('    from torchaudio.save_shim import save as save_shim_fallback')
+                        new_lines.append('except ImportError:')
+                        new_lines.append('    save_shim_fallback = None')
+                        import_added = True
+                
+                # Find the except block that handles AudioEncoder errors
+                if 'except RuntimeError' in line and i + 1 < len(lines) and 'Failed to create AudioEncoder' in lines[i+1]:
+                    indent = len(line) - len(line.lstrip())
+                    # Replace the except block
+                    new_lines.append(' ' * indent + 'except (RuntimeError, ImportError) as e:')
+                    # Skip the next line (raise RuntimeError...)
+                    i += 1
+                    if i < len(lines):
+                        i += 1  # Skip the raise line
+                    # Add our fallback
+                    new_lines.append(' ' * (indent + 4) + '# Fallback to soundfile shim if torchcodec fails')
+                    new_lines.append(' ' * (indent + 4) + 'if save_shim_fallback is not None and ("torchcodec" in str(e).lower() or "AudioEncoder" in str(e)):')
+                    new_lines.append(' ' * (indent + 4) + '    return save_shim_fallback(uri, src, sample_rate)')
+                    new_lines.append(' ' * (indent + 4) + 'raise')
+                    continue
+                
+                i += 1
+            
+            content = '\n'.join(new_lines)
+            
+            with open(torchcodec_module, 'w') as f:
+                f.write(content)
+            print('Patched save_with_torchcodec() to use save_shim fallback')
 PY
 
 # --- Stage 3: Application -----------------------------------------------------
@@ -238,8 +691,10 @@ with open('fam/llm/fast_inference_utils.py', 'w') as f:
 PY
 
 # Ensure PyTorch's bundled cuDNN is used (9.10.2) instead of system cuDNN (9.8.0)
+# Also add torchcodec and FFmpeg 6.x library paths
+# FFmpeg 6.x installs to /usr/local/lib, torchcodec is in dist-packages
 # This must be set at runtime, not just build time
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/lib/python3.10/dist-packages/torchcodec:/usr/local/lib:${LD_LIBRARY_PATH}
 
 EXPOSE 9010
 CMD [ "python", "serving.py", "--port=9010" ]
