@@ -120,7 +120,7 @@ RUN pip install --no-cache-dir \
         tiktoken \
         deepfilternet \
         pydub \
-        posthog \
+        posthog==2.5.0 \
         python-multipart
 
 # AudioCraft: install without letting it “helpfully” pin torch==2.1.0.
@@ -604,6 +604,88 @@ def _pl(*a, **kw):\n\
     kw.setdefault('weights_only', False)\n\
     return _load(*a, **kw)\n\
 torch.load=_pl\n" serving.py
+
+# Fix PostHog API compatibility issue
+# AudioCraft calls Client.capture() with old API format that's incompatible with newer PostHog
+# We patch Client.capture to be a no-op to avoid the error
+RUN python - <<'PY'
+import pathlib
+import site
+import sys
+
+# Find site-packages directory
+site_packages = None
+for p in site.getsitepackages():
+    if 'site-packages' in p or 'dist-packages' in p:
+        site_packages = pathlib.Path(p)
+        break
+
+if not site_packages:
+    for p in sys.path:
+        if 'site-packages' in p or 'dist-packages' in p:
+            site_packages = pathlib.Path(p)
+            break
+
+if site_packages:
+    # Create sitecustomize.py that patches PostHog Client.capture to be a no-op
+    sitecustomize = site_packages / "sitecustomize.py"
+    sitecustomize.write_text('''
+# Patch PostHog Client.capture to be a no-op to avoid API compatibility issues
+# AudioCraft uses old API format that's incompatible with newer PostHog versions
+import sys
+import importlib
+
+def _patch_posthog():
+    """Patch PostHog Client.capture to be a no-op."""
+    try:
+        # Try to get posthog module if it's already imported
+        if 'posthog' in sys.modules:
+            posthog = sys.modules['posthog']
+        else:
+            # Import it to patch it
+            posthog = importlib.import_module('posthog')
+        
+        if hasattr(posthog, 'Client'):
+            # Make capture a no-op that accepts any arguments
+            def noop_capture(self, *args, **kwargs):
+                pass
+            posthog.Client.capture = noop_capture
+            # Also patch the module-level capture if it exists
+            if hasattr(posthog, 'capture'):
+                posthog.capture = lambda *args, **kwargs: None
+    except (ImportError, AttributeError):
+        pass  # PostHog not installed or doesn't have Client
+
+# Use importlib's import hook for more reliable patching
+_original_import_module = importlib.import_module
+
+def _patched_import_module(name, *args, **kwargs):
+    module = _original_import_module(name, *args, **kwargs)
+    if name == 'posthog':
+        _patch_posthog()
+    return module
+
+importlib.import_module = _patched_import_module
+
+# Also patch __import__ for compatibility
+_original_import = __builtins__.__import__
+
+def _patched_import(name, *args, **kwargs):
+    module = _original_import(name, *args, **kwargs)
+    if name == 'posthog' or (hasattr(module, '__name__') and module.__name__ == 'posthog'):
+        _patch_posthog()
+    return module
+
+__builtins__.__import__ = _patched_import
+
+# Try to patch immediately if posthog is already imported
+if 'posthog' in sys.modules:
+    _patch_posthog()
+''')
+    print(f"Created {sitecustomize} to disable PostHog telemetry")
+else:
+    print("Could not find site-packages directory")
+PY
 
 # Fix bug in serving.py: change 'from attr[s] import dataclass' to Python's built-in 'from dataclasses import dataclass'
 RUN sed -i -e 's/from attr import dataclass/from dataclasses import dataclass/' -e 's/from attrs import dataclass/from dataclasses import dataclass/' serving.py
