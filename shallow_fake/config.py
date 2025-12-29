@@ -38,7 +38,7 @@ class PathsConfig(BaseModel):
         Synthetic dataset directory.
         
         Args:
-            teacher_kind: Teacher model kind ('xtts' or 'metavoice'). 
+            teacher_kind: Teacher model kind ('xtts', 'metavoice', or 'openvoice'). 
                          If None, defaults to 'synth' for backward compatibility.
         
         Returns:
@@ -155,10 +155,29 @@ class MetaVoiceTeacherConfig(BaseModel):
         return v
 
 
+class OpenVoiceTeacherConfig(BaseModel):
+    """OpenVoice teacher model service configuration."""
+
+    kind: Literal["openvoice"] = Field(default="openvoice")
+    port: int = Field(default=9010, ge=1024, le=65535, description="Port for OpenVoice HTTP server")
+    device: Literal["cuda", "cpu"] = Field(default="cuda", description="Device to use for inference")
+    language: str = Field(default="EN_NEWEST", description="Language code for MeloTTS")
+    base_speaker_key: str = Field(default="EN_BR", description="Base speaker key (e.g., EN_BR, EN_DEFAULT, EN_NEWEST, EN_US)")
+    reference_audio_dir: Path = Field(description="Directory containing reference audio files")
+
+    @field_validator("reference_audio_dir", mode="before")
+    @classmethod
+    def convert_reference_audio_dir(cls, v):
+        """Convert reference_audio_dir to Path object."""
+        if isinstance(v, str):
+            return Path(v)
+        return v
+
+
 # Union type for teacher configs with discriminated union
 # Pydantic will use the "kind" field to determine which config type to use
 TeacherConfig = Annotated[
-    Union[XTTSTeacherConfig, MetaVoiceTeacherConfig],
+    Union[XTTSTeacherConfig, MetaVoiceTeacherConfig, OpenVoiceTeacherConfig],
     Discriminator("kind"),
 ]
 
@@ -186,6 +205,9 @@ class SyntheticConfig(BaseModel):
                 self.max_parallel_jobs = self.teacher.workers * 2
             elif isinstance(self.teacher, MetaVoiceTeacherConfig):
                 # MetaVoice: default to 4 parallel jobs (MetaVoice doesn't have workers config)
+                self.max_parallel_jobs = 4
+            elif isinstance(self.teacher, OpenVoiceTeacherConfig):
+                # OpenVoice: default to 4 parallel jobs (OpenVoice doesn't have workers config)
                 self.max_parallel_jobs = 4
             else:
                 # Fallback for unknown teacher types

@@ -1,0 +1,50 @@
+# Multi-stage build for better layer caching and smaller final image
+
+# Stage 1: Base system dependencies (cached unless base image changes)
+FROM python:3.11-slim as base
+
+# System deps – ffmpeg is useful for audio processing, git for cloning repos
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ffmpeg \
+      git \
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Stage 2: Python dependencies (cached unless PyTorch/OpenVoice versions change)
+# This stage is expensive to rebuild, so we isolate it
+FROM base as deps
+
+WORKDIR /app
+
+# Install PyTorch with CUDA support first
+# Use --extra-index-url so other packages can still be found on PyPI
+# PyTorch packages are large (~2-3GB), so this layer is cached separately
+RUN pip install --no-cache-dir \
+      torch==2.3.1 torchaudio==2.3.1 \
+      --extra-index-url https://download.pytorch.org/whl/cu121
+
+# Clone and install OpenVoice + MeloTTS
+WORKDIR /opt
+RUN git clone https://github.com/myshell-ai/OpenVoice.git
+
+WORKDIR /opt/OpenVoice
+RUN pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir "git+https://github.com/myshell-ai/MeloTTS.git" && \
+    python -m unidic download && \
+    pip install --no-cache-dir fastapi uvicorn[standard] soundfile
+
+# Stage 3: Final image (only rebuilds when server code changes)
+# This stage copies dependencies from deps stage and adds application code
+FROM deps
+
+WORKDIR /app
+
+# Copy server implementation (this is the only layer that changes frequently)
+# Context is .. (project root), so path is relative to project root
+COPY services/openvoice_teacher_server.py .
+
+ENV PYTHONUNBUFFERED=1
+
+# Default port; overridden by Docker port mapping
+CMD ["uvicorn", "openvoice_teacher_server:app", "--host", "0.0.0.0", "--port", "9010"]

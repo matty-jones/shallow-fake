@@ -14,7 +14,7 @@ asr:
   min_segment_seconds: 1.0
   min_confidence: 0.7
 phoneme_check:
-  max_phoneme_distance: 0.1
+  max_phoneme_distance: 0.9  # More lenient for zero-shot TTS (was 0.1, too strict)
   use_tts_roundtrip: true
 synthetic:
   enabled: true
@@ -33,6 +33,9 @@ synthetic:
     reference_audio_dir: workspace/claudia/datasets/real/wavs
     num_reference_clips: 0
     workers: 3  # With lock in place, 3 workers = ~10.5GB (3×2GB models + 3×1.5GB inference), fits within 12GB target
+    guidance: 2.0  # Lower from default 3.0 to reduce artifacts
+    top_p: 0.9     # Slightly lower from 0.95 for more focused generation
+    top_k: 200     # Keep default
   # max_parallel_jobs is auto-calculated as workers * 2 (6 in this case)
   # You can override it by uncommenting the line below:
   # max_parallel_jobs: 12

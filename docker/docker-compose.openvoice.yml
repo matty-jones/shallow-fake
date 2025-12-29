@@ -1,0 +1,35 @@
+services:
+  openvoice-teacher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.openvoice_teacher
+    container_name: "${VOICE_ID:-voice1}_openvoice_teacher"
+
+    # GPU passthrough configuration using CDI
+    devices:
+      - "nvidia.com/gpu=all"
+    
+    environment:
+      VOICE_ID: "${VOICE_ID:-voice1}"
+      OPENVOICE_CHECKPOINT_DIR: "/models/openvoice/checkpoints_v2"
+      OPENVOICE_DEVICE: "${OPENVOICE_DEVICE:-cuda}"
+      OPENVOICE_LANGUAGE: "${OPENVOICE_LANGUAGE:-EN_NEWEST}"
+      OPENVOICE_BASE_SPEAKER_KEY: "${OPENVOICE_BASE_SPEAKER_KEY:-EN_BR}"
+      REFERENCE_AUDIO_DIR: "${REFERENCE_AUDIO_DIR}"
+      # PyTorch memory optimization to reduce fragmentation and prevent CUDA OOM
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      # CDI GPU passthrough environment variables
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    
+    command: ["sh", "-c", "uvicorn openvoice_teacher_server:app --host 0.0.0.0 --port $${OPENVOICE_PORT:-9010}"]
+
+    volumes:
+      # Host directory with speaker reference WAVs
+      - "${REFERENCE_AUDIO_DIR}:/speakers:ro"
+      # Host directory with OpenVoice model cache (checkpoints_v2)
+      # Mount the host's openvoice_baseline directory to /models/openvoice in the container
+      - "${MODEL_CACHE_DIR}/checkpoints_v2:/models/openvoice/checkpoints_v2:ro"
+
+    ports:
+      - "${OPENVOICE_PORT:-9010}:${OPENVOICE_PORT:-9010}"
