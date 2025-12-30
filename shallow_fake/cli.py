@@ -175,6 +175,8 @@ def build_synth(
             console.print("[cyan]XTTS teacher model service will be started automatically[/cyan]")
         elif teacher_kind == "metavoice":
             console.print("[cyan]MetaVoice teacher model service will be started automatically[/cyan]")
+        elif teacher_kind == "openvoice":
+            console.print("[cyan]OpenVoice teacher model service will be started automatically[/cyan]")
         else:
             console.print(f"[yellow]Unknown teacher model type: {teacher_kind}[/yellow]")
 

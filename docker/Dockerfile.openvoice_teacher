@@ -1,15 +1,33 @@
 # Multi-stage build for better layer caching and smaller final image
 
 # Stage 1: Base system dependencies (cached unless base image changes)
-FROM python:3.11-slim as base
+FROM python:3.9-slim as base
 
 # System deps – ffmpeg is useful for audio processing, git for cloning repos
+# pkg-config and FFmpeg dev libraries are required for building PyAV (dependency of OpenVoice/MeloTTS)
+# python3-dev provides Python.h and other headers needed for compiling C extensions
+# build-essential provides gcc, g++, make and other essential build tools
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+      build-essential \
+      python3-dev \
       ffmpeg \
+      libavcodec-dev \
+      libavdevice-dev \
+      libavfilter-dev \
+      libavformat-dev \
+      libavutil-dev \
+      libswscale-dev \
+      libswresample-dev \
       git \
+      pkg-config \
       ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# After installing packages, verify pkg-config can find them
+RUN pkg-config --list-all | grep -E "(avformat|avcodec|avdevice|avutil|avfilter|swscale|swresample)" || \
+    (echo "Warning: Some FFmpeg packages not found by pkg-config" && \
+     find /usr -name "*.pc" -path "*/ffmpeg*" -o -name "*av*.pc" 2>/dev/null | head -10)
 
 # Stage 2: Python dependencies (cached unless PyTorch/OpenVoice versions change)
 # This stage is expensive to rebuild, so we isolate it
@@ -17,20 +35,47 @@ FROM base as deps
 
 WORKDIR /app
 
+# Install and upgrade core build tools first
+# setuptools provides distutils compatibility needed for packages that build from source
+# wheel is needed for building wheels
+# pip upgrade ensures we have the latest pip features
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Pin Cython to a compatible version before installing anything that might build PyAV
+# PyAV's Cython code is incompatible with Cython 3.0+, so we need an older version
+# Use a specific known-working version (0.29.x series is stable and compatible)
+# This must be done FIRST, before any package that might trigger PyAV compilation
+RUN pip install --no-cache-dir "Cython==0.29.36"
+
+# Install common build dependencies as pre-built wheels to avoid building from source
+# numpy is often a dependency that gets built from source, causing distutils issues
+# Installing it first ensures pip will use a pre-built wheel
+RUN pip install --no-cache-dir numpy
+
 # Install PyTorch with CUDA support first
 # Use --extra-index-url so other packages can still be found on PyPI
 # PyTorch packages are large (~2-3GB), so this layer is cached separately
 RUN pip install --no-cache-dir \
-      torch==2.3.1 torchaudio==2.3.1 \
-      --extra-index-url https://download.pytorch.org/whl/cu121
+      torch torchaudio \
+      --extra-index-url https://download.pytorch.org/whl/cu128
+
+# Install PyAV explicitly before OpenVoice to avoid building from source
+# OpenVoice depends on PyAV, and if we install it first, pip will use the installed version
+# rather than trying to build it from source during OpenVoice installation
+# Use --no-build-isolation to ensure it uses our pinned Cython version
+RUN pip install --no-cache-dir --no-build-isolation av
 
 # Clone and install OpenVoice + MeloTTS
 WORKDIR /opt
 RUN git clone https://github.com/myshell-ai/OpenVoice.git
 
 WORKDIR /opt/OpenVoice
-RUN pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir "git+https://github.com/myshell-ai/MeloTTS.git" && \
+# Disable build isolation so pip uses the Cython we installed in the main environment
+# This is necessary because PyAV needs to build with Cython < 3.0, but pip's isolated
+# build environment would install the latest Cython (3.0+) which is incompatible
+# Also use --no-deps for OpenVoice and install dependencies separately to avoid rebuilding PyAV
+RUN pip install --no-cache-dir --no-build-isolation --no-deps -e . && \
+    pip install --no-cache-dir --no-build-isolation "git+https://github.com/myshell-ai/MeloTTS.git" && \
     python -m unidic download && \
     pip install --no-cache-dir fastapi uvicorn[standard] soundfile
 

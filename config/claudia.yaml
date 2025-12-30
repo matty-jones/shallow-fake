@@ -25,20 +25,15 @@ synthetic:
     base_url: http://localhost:9010
     voice_id: claudia_clone
   teacher:
-    kind: metavoice
+    kind: openvoice
     port: 9010
-    model_name: tts_models/multilingual/multi-dataset/xtts_v2
-    language: en
     device: cuda
+    language: EN_NEWEST
+    base_speaker_key: EN_BR
     reference_audio_dir: workspace/claudia/datasets/real/wavs
-    num_reference_clips: 0
-    workers: 3  # With lock in place, 3 workers = ~10.5GB (3×2GB models + 3×1.5GB inference), fits within 12GB target
-    guidance: 2.0  # Lower from default 3.0 to reduce artifacts
-    top_p: 0.9     # Slightly lower from 0.95 for more focused generation
-    top_k: 200     # Keep default
-  # max_parallel_jobs is auto-calculated as workers * 2 (6 in this case)
+  # max_parallel_jobs is auto-calculated (defaults to 4 for OpenVoice)
   # You can override it by uncommenting the line below:
-  # max_parallel_jobs: 12
+  # max_parallel_jobs: 8
 training:
   base_checkpoint: cori-high-500-clean.ckpt
   batch_size: 16

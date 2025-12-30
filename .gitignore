@@ -65,7 +65,7 @@ input/shared/corpus.txt
 *.tmp
 *.temp
 .cache/
-.env.*.xtts
+.env.*
 
 
 
