@@ -15,12 +15,19 @@ services:
       OPENVOICE_DEVICE: "${OPENVOICE_DEVICE:-cuda}"
       OPENVOICE_LANGUAGE: "${OPENVOICE_LANGUAGE:-EN_NEWEST}"
       OPENVOICE_BASE_SPEAKER_KEY: "${OPENVOICE_BASE_SPEAKER_KEY:-EN_BR}"
-      REFERENCE_AUDIO_DIR: "${REFERENCE_AUDIO_DIR}"
+      # REFERENCE_AUDIO_DIR is set to the container mount point, not the host path
+      # The host directory is mounted to /speakers via volumes
+      REFERENCE_AUDIO_DIR: "/speakers"
       # PyTorch memory optimization to reduce fragmentation and prevent CUDA OOM
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       # CDI GPU passthrough environment variables
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      # Ensure PyTorch's bundled cuDNN is found by faster-whisper
+      # PyTorch 2.x installs cuDNN as nvidia-cudnn-cu12 package in site-packages/nvidia/cudnn/lib/
+      # faster-whisper (used by MeloTTS) needs cuDNN for GPU acceleration
+      # The libraries are at /usr/local/lib/python3.9/site-packages/nvidia/cudnn/lib/
+      LD_LIBRARY_PATH: "/usr/local/lib/python3.9/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH}"
     
     command: ["sh", "-c", "uvicorn openvoice_teacher_server:app --host 0.0.0.0 --port $${OPENVOICE_PORT:-9010}"]
 
