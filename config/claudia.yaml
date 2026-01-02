@@ -28,8 +28,8 @@ synthetic:
     kind: openvoice
     port: 9010
     device: cuda
-    language: EN_NEWEST
-    base_speaker_key: EN_BR
+    language: EN
+    base_speaker_key: EN-BR
     reference_audio_dir: workspace/claudia/datasets/real/wavs
   # max_parallel_jobs is auto-calculated (defaults to 4 for OpenVoice)
   # You can override it by uncommenting the line below:

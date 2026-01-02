@@ -43,7 +43,7 @@ def start_openvoice_teacher(config: VoiceConfig) -> None:
 
     logger.info(f"Starting OpenVoice teacher model service for {config.voice_id}...")
     logger.info(f"Reference audio directory: {reference_dir}")
-    logger.info(f"Found {len(wav_files)} reference WAV files")
+    logger.info(f"Found {len(wav_files)} reference WAV files (will extract and average embeddings from all)")
 
     # Ensure teacher model cache directory exists
     project_root = Path.cwd()
@@ -96,6 +96,9 @@ def start_openvoice_teacher(config: VoiceConfig) -> None:
         str(env_file),
     ]
 
+    # Define start_args before try block so it's available in exception handler
+    start_args = compose_base_args + ["up", "-d"]
+    
     try:
         logger.info("Building and starting teacher model container (using cache if available)...")
         # Build with cache - Docker will automatically detect changes and rebuild only what's necessary
@@ -117,7 +120,6 @@ def start_openvoice_teacher(config: VoiceConfig) -> None:
         logger.info("Docker image built successfully")
 
         # Then start the container
-        start_args = compose_base_args + ["up", "-d"]
 
         logger.info("Starting container...")
         start_result = subprocess.run(
@@ -214,6 +216,21 @@ def start_openvoice_teacher(config: VoiceConfig) -> None:
                     logger.info(f"GPU acceleration: DISABLED (using CPU)")
 
                 logger.info(f"Language: {language}, Base speaker: {base_speaker}")
+                
+                # Log number of reference files used for embedding averaging
+                num_reference_files = health_data.get("num_reference_files")
+                if num_reference_files is not None:
+                    total_files = len(wav_files)
+                    if num_reference_files == total_files:
+                        logger.info(f"Speaker embedding computed from {num_reference_files} reference audio files (all files averaged)")
+                    else:
+                        logger.warning(
+                            f"Speaker embedding computed from {num_reference_files} reference audio files "
+                            f"(expected {total_files}, some files may have failed to process)"
+                        )
+                else:
+                    logger.warning("Could not determine number of reference files from health endpoint")
+                
                 return
         except requests.exceptions.RequestException as e:
             pass

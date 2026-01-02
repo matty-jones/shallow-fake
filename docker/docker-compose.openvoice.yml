@@ -13,8 +13,8 @@ services:
       VOICE_ID: "${VOICE_ID:-voice1}"
       OPENVOICE_CHECKPOINT_DIR: "/models/openvoice/checkpoints_v2"
       OPENVOICE_DEVICE: "${OPENVOICE_DEVICE:-cuda}"
-      OPENVOICE_LANGUAGE: "${OPENVOICE_LANGUAGE:-EN_NEWEST}"
-      OPENVOICE_BASE_SPEAKER_KEY: "${OPENVOICE_BASE_SPEAKER_KEY:-EN_BR}"
+      OPENVOICE_LANGUAGE: "${OPENVOICE_LANGUAGE:-EN}"
+      OPENVOICE_BASE_SPEAKER_KEY: "${OPENVOICE_BASE_SPEAKER_KEY:-EN-BR}"
       # REFERENCE_AUDIO_DIR is set to the container mount point, not the host path
       # The host directory is mounted to /speakers via volumes
       REFERENCE_AUDIO_DIR: "/speakers"
