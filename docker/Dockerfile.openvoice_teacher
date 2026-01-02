@@ -77,7 +77,8 @@ WORKDIR /opt/OpenVoice
 RUN pip install --no-cache-dir --no-build-isolation --no-deps -e . && \
     pip install --no-cache-dir --no-build-isolation "git+https://github.com/myshell-ai/MeloTTS.git" && \
     python -m unidic download && \
-    pip install --no-cache-dir fastapi uvicorn[standard] soundfile faster-whisper whisper-timestamped wavmark
+    pip install --no-cache-dir fastapi uvicorn[standard] soundfile faster-whisper whisper-timestamped wavmark nltk && \
+    python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng', quiet=True)"
 
 # Stage 3: Final image (only rebuilds when server code changes)
 # This stage copies dependencies from deps stage and adds application code

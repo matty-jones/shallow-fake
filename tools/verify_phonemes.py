@@ -18,6 +18,31 @@ from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
 
+# Download NLTK resources if needed (required by some dependencies like eng_to_ipa)
+# This must be done before any code that might use NLTK indirectly
+try:
+    import nltk
+    # Try to find the resource
+    try:
+        nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+        logger.debug("NLTK resource 'averaged_perceptron_tagger_eng' already available")
+    except LookupError:
+        logger.info("Downloading NLTK resources (averaged_perceptron_tagger_eng)...")
+        try:
+            nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+            # Verify it was downloaded
+            nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+            logger.info("NLTK resources downloaded and verified")
+        except Exception as e:
+            logger.warning(f"Failed to download NLTK resource: {e}")
+            logger.warning("Some features may not work correctly")
+except ImportError:
+    # NLTK not installed, that's OK - only needed if eng_to_ipa is used
+    logger.debug("NLTK not installed (this is OK if not using eng_to_ipa)")
+except Exception as e:
+    # Log but don't fail if there's any other issue
+    logger.warning(f"Unexpected error setting up NLTK: {e}")
+
 # Thread-local storage for Whisper models (one per worker thread)
 _thread_local = threading.local()
 # Lock for model initialization to prevent CUDA kernel errors

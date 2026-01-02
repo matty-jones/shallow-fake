@@ -1,5 +1,6 @@
 """Build synthetic dataset using TTS backend."""
 
+import base64
 import json
 import shutil
 import subprocess
@@ -23,6 +24,31 @@ from shallow_fake.language_utils import convert_language_for_phoneme
 from shallow_fake.utils import ensure_dir, setup_logging
 
 logger = setup_logging()
+
+# Download NLTK resources if needed (required by some dependencies like eng_to_ipa)
+# This must be done early, before any code that might indirectly import eng_to_ipa
+try:
+    import nltk
+    # Try to find the resource
+    try:
+        nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+        logger.debug("NLTK resource 'averaged_perceptron_tagger_eng' already available")
+    except LookupError:
+        logger.info("Downloading NLTK resources (averaged_perceptron_tagger_eng)...")
+        try:
+            nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+            # Verify it was downloaded
+            nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+            logger.info("NLTK resources downloaded and verified")
+        except Exception as e:
+            logger.warning(f"Failed to download NLTK resource: {e}")
+            logger.warning("Some features may not work correctly")
+except ImportError:
+    # NLTK not installed, that's OK - only needed if eng_to_ipa is used
+    logger.debug("NLTK not installed (this is OK if not using eng_to_ipa)")
+except Exception as e:
+    # Log but don't fail if there's any other issue
+    logger.warning(f"Unexpected error setting up NLTK: {e}")
 
 
 class TTSBackend:
@@ -83,6 +109,66 @@ class HTTPTTSBackend(TTSBackend):
                             return False
                         except Exception:
                             pass  # Not JSON, continue
+                    
+                    # MetaVoice returns raw audio bytes
+                    audio_data = response.content
+                    
+                elif isinstance(self.teacher_config, OpenVoiceTeacherConfig):
+                    # OpenVoice API: POST /tts with JSON body, returns JSON with base64-encoded audio
+                    base = self.base_url.rstrip("/")
+                    if base.endswith("/tts"):
+                        base = base[:-4]  # Remove /tts if present
+                    url = f"{base}/tts"
+                    
+                    params = {"text": text}
+                    logger.debug(f"OpenVoice TTS request: URL={url}, params={params}")
+                    try:
+                        response = self.session.post(url, json=params, timeout=120)
+                    except requests.exceptions.ConnectionError as e:
+                        logger.error(f"Failed to connect to OpenVoice service at {url}: {e}")
+                        logger.error("Is the OpenVoice teacher container running?")
+                        return False
+                    except requests.exceptions.Timeout as e:
+                        logger.error(f"OpenVoice TTS request timed out after 120s: {e}")
+                        return False
+                    except Exception as e:
+                        logger.error(f"Unexpected error calling OpenVoice API: {e}")
+                        return False
+                    
+                    # Check for HTTP errors before parsing
+                    try:
+                        response.raise_for_status()
+                    except requests.exceptions.HTTPError as e:
+                        logger.error(f"OpenVoice HTTP error {e.response.status_code}: {e}")
+                        try:
+                            error_detail = e.response.json().get("detail", "No details available")
+                            logger.error(f"Server error details: {error_detail}")
+                        except Exception:
+                            logger.error(f"Server response: {e.response.text[:500]}")
+                        return False
+                    
+                    # OpenVoice returns JSON with base64-encoded audio
+                    try:
+                        response_json = response.json()
+                        audio_base64 = response_json.get("audio_base64")
+                        if not audio_base64:
+                            logger.error(f"OpenVoice response missing audio_base64 field. Response: {response_json}")
+                            return False
+                        
+                        # Decode base64 audio
+                        audio_data = base64.b64decode(audio_base64)
+                        logger.info(f"OpenVoice TTS response: decoded {len(audio_data)} bytes of audio for text '{text[:50]}...'")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse OpenVoice response as JSON: {e}")
+                        logger.error(f"Response status: {response.status_code}")
+                        logger.error(f"Response content-type: {response.headers.get('content-type')}")
+                        logger.error(f"Response content (first 500 chars): {response.text[:500]}")
+                        return False
+                    except (KeyError, ValueError) as e:
+                        logger.error(f"Failed to decode OpenVoice audio: {e}")
+                        logger.error(f"Response JSON: {response_json}")
+                        return False
+                    
                 else:
                     # XTTS API: POST /tts with JSON body
                     # base_url might be http://localhost:9010 or http://localhost:9010/tts
@@ -93,34 +179,20 @@ class HTTPTTSBackend(TTSBackend):
                     url = base
                     params = {"text": text, "voice": self.voice_id}
                     response = self.session.post(url, json=params, timeout=120)
-
-                response.raise_for_status()
+                    response.raise_for_status()
+                    
+                    # XTTS returns raw audio bytes
+                    audio_data = response.content
 
                 # Check if response contains valid audio data
-                content_length = len(response.content)
+                content_length = len(audio_data)
                 if content_length == 0:
                     logger.error(f"TTS response is empty for text '{text[:50]}...'")
                     return False
                 
-                # Check content type to ensure it's audio
-                content_type = response.headers.get("content-type", "").lower()
-                if "audio" not in content_type and content_length < 100:
-                    # Very small responses are likely error messages, not audio
-                    logger.warning(
-                        f"TTS response may not be audio (content-type: {content_type}, "
-                        f"size: {content_length} bytes) for text '{text[:50]}...'"
-                    )
-                    # Try to log the response content if it's small enough
-                    if content_length < 1000:
-                        try:
-                            response_text = response.content.decode('utf-8', errors='ignore')
-                            logger.warning(f"Response content: {response_text[:200]}")
-                        except Exception:
-                            pass
-
-                # Save audio (assuming response is audio data)
+                # Save audio data
                 with open(output_path, "wb") as f:
-                    f.write(response.content)
+                    f.write(audio_data)
 
                 if not output_path.exists() or output_path.stat().st_size == 0:
                     logger.error(f"Failed to save TTS audio for text '{text[:50]}...'")
@@ -369,6 +441,19 @@ def generate_synthetic_entry(
 
 def build_synthetic_dataset(config: VoiceConfig):
     """Build synthetic dataset from text corpus."""
+    # Ensure NLTK resources are available before starting (required by eng_to_ipa)
+    try:
+        import nltk
+        try:
+            nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+        except LookupError:
+            logger.info("Downloading NLTK resources (averaged_perceptron_tagger_eng)...")
+            nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+            nltk.data.find('taggers/averaged_perceptron_tagger_eng')  # Verify
+            logger.info("NLTK resources ready")
+    except Exception as e:
+        logger.warning(f"Could not ensure NLTK resources: {e}")
+    
     if not config.synthetic.enabled:
         logger.info("Synthetic data expansion is disabled")
         return
@@ -553,11 +638,14 @@ def build_synthetic_dataset(config: VoiceConfig):
                 # Check container logs before stopping if there were errors
                 if len(valid_entries) == 0 and sentences:
                     logger.warning("No valid entries generated. Checking container logs...")
-                    container_name = (
-                        f"{config.voice_id}_xtts_teacher"
-                        if teacher_kind == "xtts"
-                        else f"{config.voice_id}_metavoice_teacher"
-                    )
+                    if teacher_kind == "xtts":
+                        container_name = f"{config.voice_id}_xtts_teacher"
+                    elif teacher_kind == "metavoice":
+                        container_name = f"{config.voice_id}_metavoice_teacher"
+                    elif teacher_kind == "openvoice":
+                        container_name = f"{config.voice_id}_openvoice_teacher"
+                    else:
+                        container_name = None
                     try:
                         # Try to get logs from running or stopped container
                         result = subprocess.run(
