@@ -1,5 +1,6 @@
 """Orchestration helpers for OpenVoice teacher model service."""
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -228,6 +229,65 @@ def start_openvoice_teacher(config: VoiceConfig) -> None:
                             f"Speaker embedding computed from {num_reference_files} reference audio files "
                             f"(expected {total_files}, some files may have failed to process)"
                         )
+                        # Fetch container logs to show detailed error messages
+                        container_name = f"{config.voice_id}_openvoice_teacher"
+                        try:
+                            log_result = subprocess.run(
+                                ["docker", "logs", container_name],
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                            )
+                            # Look for embedding extraction summary and error messages
+                            log_lines = log_result.stdout.split("\n")
+                            summary_lines = []
+                            error_lines = []
+                            
+                            # Search for summary lines - look for "Successful:" and "Failed:" lines
+                            found_summary_start = False
+                            for line in log_lines:
+                                # Look for the start of the summary
+                                if "Embedding extraction summary" in line or ("Successful:" in line and "/" in line):
+                                    found_summary_start = True
+                                
+                                if found_summary_start:
+                                    # Capture summary lines (until we hit another separator or unrelated content)
+                                    if "=" * 50 in line or (line.count("=") > 40):
+                                        if summary_lines:
+                                            break  # End of summary
+                                    elif line.strip() and ("Successful:" in line or "Failed:" in line or "- " in line or "All files processed" in line):
+                                        # Clean up the line (remove log prefixes like timestamps)
+                                        clean_line = re.sub(r'^\[.*?\]\s*(INFO|WARNING|ERROR)\s+', '', line)
+                                        clean_line = clean_line.strip()
+                                        if clean_line:
+                                            summary_lines.append(clean_line)
+                            
+                            # Also capture individual ERROR lines about failed files
+                            for line in log_lines:
+                                if "ERROR" in line and ("Failed to extract embedding" in line or "Reference WAV file not found" in line):
+                                    # Clean up the line
+                                    clean_line = re.sub(r'^\[.*?\]\s*ERROR\s+', '', line)
+                                    clean_line = clean_line.strip()
+                                    if clean_line:
+                                        error_lines.append(clean_line)
+                            
+                            # Display summary if found
+                            if summary_lines:
+                                logger.warning("=" * 60)
+                                logger.warning("Reference file processing details from container logs:")
+                                logger.warning("=" * 60)
+                                for line in summary_lines:
+                                    logger.warning(line)
+                                logger.warning("=" * 60)
+                            elif error_lines:
+                                # If no summary but we have error lines, show those
+                                logger.warning("Failed file details from container logs:")
+                                for line in error_lines[-10:]:  # Show last 10 error lines
+                                    logger.warning(line)
+                        except subprocess.CalledProcessError:
+                            logger.debug("Could not fetch container logs for detailed error information")
+                        except Exception as e:
+                            logger.debug(f"Error fetching container logs: {e}")
                 else:
                     logger.warning("Could not determine number of reference files from health endpoint")
                 
