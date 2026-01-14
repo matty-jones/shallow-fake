@@ -25,13 +25,17 @@ synthetic:
     base_url: http://localhost:9010
     voice_id: claudia_clone
   teacher:
-    kind: openvoice
+    kind: xtts  # Change to 'openvoice' or 'metavoice' to switch teacher models
     port: 9010
     device: cuda
-    language: EN
-    base_speaker_key: EN-BR
     reference_audio_dir: workspace/claudia/datasets/real/wavs
-  # max_parallel_jobs is auto-calculated (defaults to 4 for OpenVoice)
+    # XTTS-specific configuration
+    xtts_language: en
+    num_reference_clips: 0  # 0 means use all available reference clips (26 clips)
+    # OpenVoice-specific configuration (used when kind: openvoice)
+    openvoice_language: EN
+    openvoice_base_speaker_key: EN-BR
+  # max_parallel_jobs is auto-calculated (defaults to workers * 2 for XTTS, 4 for OpenVoice/MetaVoice)
   # You can override it by uncommenting the line below:
   # max_parallel_jobs: 8
 training:

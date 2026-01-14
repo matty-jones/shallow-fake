@@ -4,7 +4,6 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.xtts_teacher
     container_name: "${VOICE_ID:-voice1}_xtts_teacher"
-    restart: unless-stopped
 
     # GPU passthrough configuration using CDI
     devices:

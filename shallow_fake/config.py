@@ -328,12 +328,32 @@ class VoiceConfig(BaseModel):
                 data["synthetic"]["corpus_text_path"] = str(project_root / corpus_path)
 
         # Resolve reference_audio_dir path if teacher is configured
+        # Also handle prefixed teacher-specific config fields
         if "synthetic" in data and "teacher" in data["synthetic"] and data["synthetic"]["teacher"]:
             teacher = data["synthetic"]["teacher"]
+            teacher_kind = teacher.get("kind")
+            
+            # Resolve reference_audio_dir path
             if "reference_audio_dir" in teacher and isinstance(teacher["reference_audio_dir"], str):
                 teacher["reference_audio_dir"] = str(project_root / teacher["reference_audio_dir"])
+            
+            # Map prefixed fields to unprefixed fields based on teacher kind
+            # This allows all teacher configs to coexist in the same YAML
+            # Unprefixed fields take precedence if both are present
+            if teacher_kind == "openvoice":
+                # Map openvoice_language -> language (only if language not already set)
+                if "openvoice_language" in teacher and "language" not in teacher:
+                    teacher["language"] = teacher.pop("openvoice_language")
+                # Map openvoice_base_speaker_key -> base_speaker_key (only if base_speaker_key not already set)
+                if "openvoice_base_speaker_key" in teacher and "base_speaker_key" not in teacher:
+                    teacher["base_speaker_key"] = teacher.pop("openvoice_base_speaker_key")
+            elif teacher_kind == "xtts":
+                # Map xtts_language -> language (only if language not already set)
+                if "xtts_language" in teacher and "language" not in teacher:
+                    teacher["language"] = teacher.pop("xtts_language")
+            
             # Handle MetaVoice base_url default if not set
-            if teacher.get("kind") == "metavoice" and "base_url" not in teacher:
+            if teacher_kind == "metavoice" and "base_url" not in teacher:
                 port = teacher.get("port", 9010)
                 teacher["base_url"] = f"http://localhost:{port}"
 
