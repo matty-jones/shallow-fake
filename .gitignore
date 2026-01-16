@@ -67,5 +67,8 @@ input/shared/corpus.txt
 .cache/
 .env.*
 
+# Internal tracking (keep locally, don't commit)
+PROGRESS.md
+
 
 

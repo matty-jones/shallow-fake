@@ -229,6 +229,33 @@ The pipeline uses Docker for:
 
 Use `shallow-fake cleanup-docker` to free disk space by cleaning Docker build cache. Add `--all` to also remove unused images, containers, and volumes.
 
+### Troubleshooting Docker Services
+
+If a teacher model service fails to start or exits unexpectedly:
+
+1. **Check container logs:**
+   ```bash
+   docker logs <container-name>  # View logs
+   docker logs -f <container-name>  # Follow logs in real-time
+   ```
+
+2. **List containers:**
+   ```bash
+   docker ps -a  # Show all containers (including stopped)
+   docker ps -a --filter "name=<service>"  # Filter by name
+   ```
+
+3. **Check container status:**
+   ```bash
+   docker inspect <container-name> --format='{{.State.ExitCode}}'  # Exit code
+   ```
+
+4. **Common issues:**
+   - **Container exits immediately**: Check logs for errors (missing dependencies, permission issues, GPU not available)
+   - **GPU not available**: Ensure NVIDIA Container Toolkit is installed and `--gpus all` or CDI devices are configured
+   - **Permission errors**: Verify volume mount paths exist and have correct permissions
+   - **ModuleNotFoundError**: Missing dependency in Dockerfile - check service implementation
+
 ## Configuration
 
 Each project has its own YAML configuration file in `config/`. Key configuration sections:
